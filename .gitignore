@@ -9,6 +9,7 @@ dist/
 
 # Environments & secrets
 .env
+.env.local
 !.env.example
 
 # Go

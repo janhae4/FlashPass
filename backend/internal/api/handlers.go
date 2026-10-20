@@ -195,6 +195,119 @@ func (h *Handler) GetStock(c *fiber.Ctx) error {
 	})
 }
 
+// GetEvent returns event metadata and live stock
+// GET /api/v1/events/:id
+func (h *Handler) GetEvent(c *fiber.Ctx) error {
+	eventIDStr := c.Params("id")
+	eventUUID, err := uuid.Parse(eventIDStr)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid event UUID"})
+	}
+
+	var title string
+	var total, available int
+	var start, end time.Time
+	err = h.db.Pool.QueryRow(c.Context(), `
+		SELECT title, total_tickets, available_tickets, start_time, end_time
+		FROM events WHERE id = $1
+	`, eventUUID).Scan(&title, &total, &available, &start, &end)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+	}
+
+	// Read live stock from Redis if populated
+	liveStock, err := h.redis.GetStock(c.Context(), eventIDStr)
+	if err == nil {
+		available = liveStock
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"id":                eventIDStr,
+		"title":             title,
+		"total_tickets":     total,
+		"available_tickets": available,
+		"start_time":        start.Format(time.RFC3339),
+		"end_time":          end.Format(time.RFC3339),
+	})
+}
+
+// GetAdminMetrics returns live stats (Redis stock vs PostgreSQL orders)
+// GET /api/v1/admin/events/:id/metrics
+func (h *Handler) GetAdminMetrics(c *fiber.Ctx) error {
+	eventIDStr := c.Params("id")
+	eventUUID, err := uuid.Parse(eventIDStr)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid event UUID"})
+	}
+
+	ctx := c.Context()
+	stock, _ := h.redis.GetStock(ctx, eventIDStr)
+
+	var pending, paid, expired, totalOrders int
+	rows, err := h.db.Pool.Query(ctx, `
+		SELECT status, count(*) FROM orders WHERE event_id = $1 GROUP BY status
+	`, eventUUID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var st string
+			var cnt int
+			if err := rows.Scan(&st, &cnt); err == nil {
+				totalOrders += cnt
+				switch st {
+				case "PENDING_PAYMENT":
+					pending = cnt
+				case "PAID":
+					paid = cnt
+				case "EXPIRED":
+					expired = cnt
+				}
+			}
+		}
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"event_id":       eventIDStr,
+		"stock":          stock,
+		"pending_orders": pending,
+		"paid_orders":    paid,
+		"expired_orders": expired,
+		"total_orders":   totalOrders,
+	})
+}
+
+// ResetEvent cleans orders and restores Redis stock
+// POST /api/v1/admin/events/:id/reset
+func (h *Handler) ResetEvent(c *fiber.Ctx) error {
+	eventIDStr := c.Params("id")
+	eventUUID, err := uuid.Parse(eventIDStr)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid event UUID"})
+	}
+
+	ctx := c.Context()
+
+	var totalTickets int
+	err = h.db.Pool.QueryRow(ctx, "SELECT total_tickets FROM events WHERE id = $1", eventUUID).Scan(&totalTickets)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+	}
+
+	// 1. Delete orders in DB
+	_, _ = h.db.Pool.Exec(ctx, "DELETE FROM orders WHERE event_id = $1", eventUUID)
+
+	// 2. Reset Redis stock & clear booked user tags
+	if err := h.redis.ResetEvent(ctx, eventIDStr, totalTickets); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to reset Redis stock"})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"event_id": eventIDStr,
+		"stock":    totalTickets,
+		"message":  "Event and inventory reset successfully",
+	})
+}
+
 // PayOrder handles mock payment for a reserved order
 // POST /api/v1/orders/:id/pay
 func (h *Handler) PayOrder(c *fiber.Ctx) error {

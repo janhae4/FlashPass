@@ -24,6 +24,8 @@ func SetupRouter(app *fiber.App, h *Handler) {
 	// Admin endpoints
 	admin := v1.Group("/admin")
 	admin.Post("/events/:id/prewarm", h.PrewarmEvent)
+	admin.Get("/events/:id/metrics", h.GetAdminMetrics)
+	admin.Post("/events/:id/reset", h.ResetEvent)
 
 	// Ticket endpoints
 	tickets := v1.Group("/tickets")
@@ -31,6 +33,7 @@ func SetupRouter(app *fiber.App, h *Handler) {
 
 	// Event inventory endpoints
 	events := v1.Group("/events")
+	events.Get("/:id", h.GetEvent)
 	events.Get("/:id/stock", h.GetStock)
 
 	// Order endpoints

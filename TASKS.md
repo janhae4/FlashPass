@@ -34,18 +34,18 @@
 - [x] 4.4 Implement Payment Mock Endpoint `POST /api/v1/orders/:id/pay` (transitions status to `PAID`).
 
 ## Phase 5: Interactive Frontend Client & Live Demo Dashboard (Next.js 15)
-- [ ] 5.1 Initialize Next.js 15 frontend application with Tailwind CSS and Lucide icons.
-- [ ] 5.2 Build Event Booking Page:
-  - Event banner, ticket tier details, and countdown timer to sale opening.
-  - Real-time inventory progress bar (synced via polling or SSE/WebSocket).
-  - High-concurrency "Mua Vé Ngay" button with client-side UUID generation (`idempotency_key`).
-- [ ] 5.3 Build Reservation Modal & Payment Flow:
-  - 10-minute live countdown timer for pending payment.
-  - "Thanh toán giả lập (Mock Pay)" button calling `POST /api/v1/orders/:id/pay`.
-  - Visual feedback when ticket expires and is released back to stock.
-- [ ] 5.4 Build Admin Live Monitoring Dashboard:
-  - Gauge cards: Current Redis Stock, Queued Orders, Paid Orders, Expired Orders.
-  - One-click "Pre-warm Stock" and "Restock Event" buttons for live interview presentations.
+- [x] 5.1 Initialize Next.js 15 frontend application with Tailwind CSS and Lucide icons.
+- [x] 5.2 Build Event Booking Page:
+  - [x] Event banner, ticket tier details, and countdown timer to sale opening.
+  - [x] Real-time inventory progress bar (synced via polling or SSE/WebSocket).
+  - [x] High-concurrency "Mua Vé Ngay" button with client-side UUID generation (`idempotency_key`).
+- [x] 5.3 Build Reservation Modal & Payment Flow:
+  - [x] 10-minute live countdown timer for pending payment.
+  - [x] "Thanh toán giả lập (Mock Pay)" button calling `POST /api/v1/orders/:id/pay`.
+  - [x] Visual feedback when ticket expires and is released back to stock.
+- [x] 5.4 Build Admin Live Monitoring Dashboard:
+  - [x] Gauge cards: Current Redis Stock, Queued Orders, Paid Orders, Expired Orders.
+  - [x] One-click "Pre-warm Stock" and "Restock Event" buttons for live interview presentations.
 
 ## Phase 6: Benchmark & Load Testing with k6
 - [ ] 6.1 Write `load-test.js` targeting 20,000 virtual requests hitting 1,000 inventory stock.
