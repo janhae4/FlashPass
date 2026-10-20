@@ -86,13 +86,12 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("failed to declare exchange: %w", err)
 	}
 
-	// Declare order creation queue
 	qCreate, err := ch.QueueDeclare(
 		OrderCreateQueue,
-		true,  // durable
-		false, // delete when unused
-		false, // exclusive
-		false, // no-wait
+		true,
+		false,
+		false,
+		false,
 		nil,
 	)
 	if err != nil {
@@ -101,7 +100,6 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("failed to declare queue: %w", err)
 	}
 
-	// Bind queue to order exchange
 	err = ch.QueueBind(qCreate.Name, OrderCreateKey, OrderExchange, false, nil)
 	if err != nil {
 		_ = ch.Close()
@@ -109,7 +107,6 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("failed to bind queue: %w", err)
 	}
 
-	// 2. Declare x-delayed-message exchange for order timeout (10-minute payment expiration)
 	err = ch.ExchangeDeclare(
 		DelayedExchange,
 		"x-delayed-message",
@@ -125,7 +122,6 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("failed to declare delayed exchange: %w", err)
 	}
 
-	// Declare order timeout queue
 	qTimeout, err := ch.QueueDeclare(
 		OrderTimeoutQueue,
 		true,  // durable
@@ -140,7 +136,6 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("failed to declare timeout queue: %w", err)
 	}
 
-	// Bind timeout queue to delayed exchange
 	err = ch.QueueBind(qTimeout.Name, OrderTimeoutKey, DelayedExchange, false, nil)
 	if err != nil {
 		_ = ch.Close()
@@ -153,12 +148,10 @@ func (p *Producer) connect() error {
 	return nil
 }
 
-// PublishOrderCreate sends the order creation message to RabbitMQ
 func (p *Producer) PublishOrderCreate(ctx context.Context, payload interface{}) error {
 	return p.publish(ctx, OrderExchange, OrderCreateKey, payload, 0)
 }
 
-// PublishDelayedOrderTimeout sends a delayed message to RabbitMQ for stock compensation
 func (p *Producer) PublishDelayedOrderTimeout(ctx context.Context, payload interface{}, delayMs int64) error {
 	return p.publish(ctx, DelayedExchange, OrderTimeoutKey, payload, delayMs)
 }

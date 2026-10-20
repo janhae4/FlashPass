@@ -19,28 +19,24 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 1. PostgreSQL Connection Pool
 	db, err := database.New(ctx, cfg)
 	if err != nil {
 		log.Fatalf("[Worker FATAL] Database connection failed: %v", err)
 	}
 	defer db.Close()
 
-	// 2. Redis Client
 	redisClient, err := redis.New(ctx, cfg)
 	if err != nil {
 		log.Fatalf("[Worker FATAL] Redis connection failed: %v", err)
 	}
 	defer redisClient.Close()
 
-	// 3. RabbitMQ Producer & Channel
 	producer, err := rabbitmq.NewProducer(cfg)
 	if err != nil {
 		log.Fatalf("[Worker FATAL] RabbitMQ producer failed: %v", err)
 	}
 	defer producer.Close()
 
-	// 4. Start Consumers
 	svc := consumer.NewService(db, redisClient, producer)
 	if err := svc.Start(ctx); err != nil {
 		log.Fatalf("[Worker FATAL] Consumer service failed to start: %v", err)

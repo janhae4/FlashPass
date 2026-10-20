@@ -293,6 +293,17 @@ func (h *Handler) ResetEvent(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
 	}
 
+	var req struct {
+		Tickets int `json:"tickets"`
+	}
+	_ = c.BodyParser(&req)
+	if req.Tickets > 0 {
+		totalTickets = req.Tickets
+	} else if q := c.QueryInt("tickets", 0); q > 0 {
+		totalTickets = q
+	}
+	_, _ = h.db.Pool.Exec(ctx, "UPDATE events SET total_tickets = $1, available_tickets = $1 WHERE id = $2", totalTickets, eventUUID)
+
 	// 1. Delete orders in DB
 	_, _ = h.db.Pool.Exec(ctx, "DELETE FROM orders WHERE event_id = $1", eventUUID)
 

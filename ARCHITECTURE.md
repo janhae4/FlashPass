@@ -72,3 +72,16 @@ CREATE INDEX idx_orders_idempotency ON orders(idempotency_key);
   - **Queue:** `flashpass.order.create.queue` (Routing Key: `order.create`) -> Order persistence worker.
 - **Delayed Exchange:** `flashpass.order.delayed.exchange` (`x-delayed-message`)
   - **Queue:** `flashpass.order.timeout.queue` -> Listens for 10-minute expiration check.
+
+## 5. In-Browser Benchmark Architecture & API Extensions
+### Dynamic Reset Endpoint:
+- `POST /api/v1/admin/events/:id/reset`
+  - Optional JSON Body: `{ "tickets": 500 }` (defaults to event's initial total tickets if omitted).
+  - Truncates existing orders for the event in PostgreSQL.
+  - Flushes Redis booking tags `flashpass:user_booked:{event_id}:*` and sets `flashpass:stock:{event_id}` to specified tickets count.
+
+### Frontend Benchmark Simulator (Client-side Engine):
+- Dispatches concurrent asynchronous promises in configurable batches (e.g., 20 - 100 concurrent workers).
+- Accumulates response latencies in real-time array to compute `min`, `avg`, `p90`, `p95`, `p99`.
+- Tracks `tickets_accepted_202`, `tickets_sold_out_409`, `tickets_error_5xx`.
+- Stores run summaries in browser `localStorage` (`flashpass_benchmark_history`) without polluting PostgreSQL.

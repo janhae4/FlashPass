@@ -52,3 +52,9 @@
 - [x] 6.2 Execute test and collect metrics: RPS, p95/p99 latency, HTTP 202 count vs HTTP 409 count.
 - [x] 6.3 Verify PostgreSQL count: Exactly 1,000 orders created (0 overselling).
 - [x] 6.4 Generate `BENCHMARK.md` report with graphs and summary for GitHub README.
+- [x] 6.5 Update backend `POST /api/v1/admin/events/:id/reset` to support custom `tickets` parameter.
+- [x] 6.6 Build Interactive In-Browser Benchmark Simulator in Next.js:
+  - [x] Custom ticket capacity selection (e.g. 500, 1000, 2000) & surge request count (1,000 to 20,000).
+  - [x] Live execution gauge: real-time RPS, latency percentiles (min, avg, p95, p99), 202 vs 409 counters.
+  - [x] Zero Overselling dynamically validated in UI.
+  - [x] Client-side Benchmark History stored in `localStorage` (no database pollution) with run-to-run comparison.

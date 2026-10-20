@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-//go:embed migrations/*.sql
 var MigrationFS embed.FS
 
 type Migrator struct {
@@ -21,7 +20,6 @@ func NewMigrator(db *DB) *Migrator {
 	return &Migrator{db: db}
 }
 
-// EnsureMigrationTable creates the schema_migrations table if not present
 func (m *Migrator) EnsureMigrationTable(ctx context.Context) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -57,7 +55,6 @@ func (m *Migrator) GetAppliedMigrations(ctx context.Context) (map[string]time.Ti
 	return applied, nil
 }
 
-// Up applies all pending UP migrations
 func (m *Migrator) Up(ctx context.Context) error {
 	applied, err := m.GetAppliedMigrations(ctx)
 	if err != nil {
@@ -116,7 +113,6 @@ func (m *Migrator) Up(ctx context.Context) error {
 	return nil
 }
 
-// Down rolls back the most recent migration or all if specified
 func (m *Migrator) Down(ctx context.Context) error {
 	applied, err := m.GetAppliedMigrations(ctx)
 	if err != nil {
@@ -174,7 +170,7 @@ func (m *Migrator) Down(ctx context.Context) error {
 		}
 
 		log.Printf("[Migrator] Successfully reverted migration: %s", version)
-		break // Revert one batch at a time
+		break
 	}
 
 	return nil

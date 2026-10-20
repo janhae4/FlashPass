@@ -23,10 +23,10 @@ export const options = {
     },
   },
   thresholds: {
-    tickets_accepted_202: ['count==1000'], // Exactly 1,000 tickets reserved
-    tickets_sold_out_409: [`count==${TOTAL_REQUESTS - 1000}`], // Exactly remaining requests fail-fast
-    tickets_error_5xx: ['count==0'],       // Zero 5xx server errors
-    http_req_duration: ['p(95)<30', 'p(99)<60'], // Low latency invariant
+    tickets_accepted_202: ['count==1000'],
+    tickets_sold_out_409: [`count==${TOTAL_REQUESTS - 1000}`], 
+    tickets_error_5xx: ['count==0'],
+    http_req_duration: ['p(95)<30', 'p(99)<60'],
   },
 };
 

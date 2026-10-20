@@ -14,7 +14,6 @@ type DB struct {
 	Pool *pgxpool.Pool
 }
 
-// New creates a new PostgreSQL connection pool with explicit configuration and resilience
 func New(ctx context.Context, cfg *config.Config) (*DB, error) {
 	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
@@ -37,7 +36,6 @@ func New(ctx context.Context, cfg *config.Config) (*DB, error) {
 		return nil, fmt.Errorf("failed to connect to postgres: %w", err)
 	}
 
-	// Verify connection by pinging
 	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer pingCancel()
 
@@ -52,15 +50,12 @@ func New(ctx context.Context, cfg *config.Config) (*DB, error) {
 	return &DB{Pool: pool}, nil
 }
 
-// Close gracefully closes the connection pool
 func (db *DB) Close() {
 	if db.Pool != nil {
 		db.Pool.Close()
 		log.Println("[Database] Connection pool closed.")
 	}
 }
-
-// Ping checks if the database is accessible
 func (db *DB) Ping(ctx context.Context) error {
 	return db.Pool.Ping(ctx)
 }

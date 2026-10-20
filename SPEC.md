@@ -37,3 +37,10 @@ Build an ultra-low-latency, high-concurrency ticket reservation engine capable o
 2. **Real-time Admin Monitoring Dashboard:**
    - Live metrics: In-memory stock vs PostgreSQL persistent orders, incoming RPS counter, payment conversion rate.
    - One-click "Pre-warm Cache" and "Reset/Restock Event" controls for interview demonstrations.
+3. **Interactive In-Browser Benchmark Simulator (k6 Visual Demo):**
+   - Live browser-based simulation replacing CLI k6 execution for presentations.
+   - Configurable parameters: Stock Capacity (e.g., 500, 1,000, 2,000 tickets), Total Requests (e.g., 2,000 - 20,000), and Concurrency level.
+   - Concurrent async pipeline dispatching bookings with unique idempotency keys.
+   - Real-time performance tracking: RPS counter, Latency percentiles (min, avg, p95, p99), Success 202 vs Fail-Fast 409 counters, and Error 5xx.
+   - Zero Overselling Invariant verification: Dynamically asserts accepted reservations == initial inventory pool.
+   - Benchmark History stored strictly in browser `localStorage` (zero database pollution) with run-by-run comparison.
