@@ -195,6 +195,67 @@ func (h *Handler) GetStock(c *fiber.Ctx) error {
 	})
 }
 
+// PayOrder handles mock payment for a reserved order
+// POST /api/v1/orders/:id/pay
+func (h *Handler) PayOrder(c *fiber.Ctx) error {
+	orderIDStr := c.Params("id")
+	orderUUID, err := uuid.Parse(orderIDStr)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid order UUID format",
+		})
+	}
+
+	ctx := c.Context()
+
+	var status string
+	var expiresAt time.Time
+	err = h.db.Pool.QueryRow(ctx, "SELECT status, expires_at FROM orders WHERE id = $1", orderUUID).
+		Scan(&status, &expiresAt)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Order not found",
+		})
+	}
+
+	if status == "PAID" {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"order_id": orderIDStr,
+			"status":   "PAID",
+			"message":  "Order already paid",
+		})
+	}
+
+	if status == "EXPIRED" || time.Now().After(expiresAt) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Order has expired and tickets were released",
+		})
+	}
+
+	if status != "PENDING_PAYMENT" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Order cannot be paid in current status: " + status,
+		})
+	}
+
+	// Update to PAID
+	res, err := h.db.Pool.Exec(ctx, `
+		UPDATE orders SET status = 'PAID', updated_at = NOW()
+		WHERE id = $1 AND status = 'PENDING_PAYMENT'
+	`, orderUUID)
+	if err != nil || res.RowsAffected() == 0 {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to update order payment status",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"order_id": orderIDStr,
+		"status":   "PAID",
+		"message":  "Payment successful",
+	})
+}
+
 // HealthCheck provides liveness probe
 // GET /health
 func (h *Handler) HealthCheck(c *fiber.Ctx) error {

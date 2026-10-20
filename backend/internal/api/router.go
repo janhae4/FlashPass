@@ -32,4 +32,8 @@ func SetupRouter(app *fiber.App, h *Handler) {
 	// Event inventory endpoints
 	events := v1.Group("/events")
 	events.Get("/:id/stock", h.GetStock)
+
+	// Order endpoints
+	orders := v1.Group("/orders")
+	orders.Post("/:id/pay", h.PayOrder)
 }

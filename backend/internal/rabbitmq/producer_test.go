@@ -30,4 +30,11 @@ func TestRabbitMQProducer(t *testing.T) {
 	if err := producer.PublishOrderCreate(ctx, payload); err != nil {
 		t.Fatalf("Failed to publish order.create event: %v", err)
 	}
+
+	// Purge test message from queue
+	ch, err := producer.Channel()
+	if err == nil {
+		_, _ = ch.QueuePurge(OrderCreateQueue, false)
+		_ = ch.Close()
+	}
 }

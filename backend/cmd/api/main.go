@@ -12,6 +12,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"flashpass/backend/internal/api"
 	"flashpass/backend/internal/config"
+	"flashpass/backend/internal/consumer"
 	"flashpass/backend/internal/database"
 	"flashpass/backend/internal/rabbitmq"
 	"flashpass/backend/internal/redis"
@@ -48,7 +49,13 @@ func main() {
 	}
 	defer producer.Close()
 
-	// 4. Initialize Fiber App
+	// 4. Background Consumers (Order creation & Delayed expiration)
+	consumerService := consumer.NewService(db, redisClient, producer)
+	if err := consumerService.Start(ctx); err != nil {
+		log.Printf("[Server WARNING] Failed to start background consumers: %v", err)
+	}
+
+	// 5. Initialize Fiber App
 	app := fiber.New(fiber.Config{
 		ServerHeader: "FlashPass-Engine/1.0",
 		ReadTimeout:  5 * time.Second,

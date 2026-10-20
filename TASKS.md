@@ -28,10 +28,10 @@
 - [x] 3.3 Implement `GET /api/v1/events/:id/stock` for live inventory inspection.
 
 ## Phase 4: Asynchronous Processing & Stock Compensation
-- [ ] 4.1 Implement RabbitMQ Order Consumer to write orders into PostgreSQL.
-- [ ] 4.2 Publish delayed message (TTL 10 min) to `flashpass.order.delayed.exchange`.
-- [ ] 4.3 Implement Timeout Worker: If order unpaid after 10 min, mark `EXPIRED` and increment Redis stock.
-- [ ] 4.4 Implement Payment Mock Endpoint `POST /api/v1/orders/:id/pay` (transitions status to `PAID`).
+- [x] 4.1 Implement RabbitMQ Order Consumer to write orders into PostgreSQL.
+- [x] 4.2 Publish delayed message (TTL 10 min) to `flashpass.order.delayed.exchange`.
+- [x] 4.3 Implement Timeout Worker: If order unpaid after 10 min, mark `EXPIRED` and increment Redis stock.
+- [x] 4.4 Implement Payment Mock Endpoint `POST /api/v1/orders/:id/pay` (transitions status to `PAID`).
 
 ## Phase 5: Interactive Frontend Client & Live Demo Dashboard (Next.js 15)
 - [ ] 5.1 Initialize Next.js 15 frontend application with Tailwind CSS and Lucide icons.

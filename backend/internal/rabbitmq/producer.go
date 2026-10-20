@@ -13,10 +13,16 @@ import (
 )
 
 const (
-	OrderExchange    = "flashpass.order.exchange"
-	OrderCreateQueue = "flashpass.order.create.queue"
-	OrderCreateKey   = "order.create"
+	OrderExchange     = "flashpass.order.exchange"
+	OrderCreateQueue  = "flashpass.order.create.queue"
+	OrderCreateKey    = "order.create"
+
+	DelayedExchange   = "flashpass.order.delayed.exchange"
+	OrderTimeoutQueue = "flashpass.order.timeout.queue"
+	OrderTimeoutKey   = "order.timeout"
 )
+
+type Delivery = amqp.Delivery
 
 type Producer struct {
 	mu   sync.Mutex
@@ -34,6 +40,21 @@ func NewProducer(cfg *config.Config) (*Producer, error) {
 	return p, nil
 }
 
+func (p *Producer) Channel() (*amqp.Channel, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.conn == nil || p.conn.IsClosed() {
+		return nil, fmt.Errorf("connection is closed")
+	}
+	return p.conn.Channel()
+}
+
+func (p *Producer) Connection() *amqp.Connection {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.conn
+}
+
 func (p *Producer) connect() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -49,7 +70,7 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("failed to open channel: %w", err)
 	}
 
-	// Declare order exchange
+	// 1. Declare standard order topic exchange
 	err = ch.ExchangeDeclare(
 		OrderExchange,
 		"topic",
@@ -66,7 +87,7 @@ func (p *Producer) connect() error {
 	}
 
 	// Declare order creation queue
-	q, err := ch.QueueDeclare(
+	qCreate, err := ch.QueueDeclare(
 		OrderCreateQueue,
 		true,  // durable
 		false, // delete when unused
@@ -80,18 +101,51 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("failed to declare queue: %w", err)
 	}
 
-	// Bind queue to exchange
-	err = ch.QueueBind(
-		q.Name,
-		OrderCreateKey,
-		OrderExchange,
-		false,
+	// Bind queue to order exchange
+	err = ch.QueueBind(qCreate.Name, OrderCreateKey, OrderExchange, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to bind queue: %w", err)
+	}
+
+	// 2. Declare x-delayed-message exchange for order timeout (10-minute payment expiration)
+	err = ch.ExchangeDeclare(
+		DelayedExchange,
+		"x-delayed-message",
+		true,  // durable
+		false, // auto-deleted
+		false, // internal
+		false, // no-wait
+		amqp.Table{"x-delayed-type": "direct"},
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to declare delayed exchange: %w", err)
+	}
+
+	// Declare order timeout queue
+	qTimeout, err := ch.QueueDeclare(
+		OrderTimeoutQueue,
+		true,  // durable
+		false, // delete when unused
+		false, // exclusive
+		false, // no-wait
 		nil,
 	)
 	if err != nil {
 		_ = ch.Close()
 		_ = conn.Close()
-		return fmt.Errorf("failed to bind queue: %w", err)
+		return fmt.Errorf("failed to declare timeout queue: %w", err)
+	}
+
+	// Bind timeout queue to delayed exchange
+	err = ch.QueueBind(qTimeout.Name, OrderTimeoutKey, DelayedExchange, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to bind timeout queue: %w", err)
 	}
 
 	p.conn = conn
@@ -101,6 +155,15 @@ func (p *Producer) connect() error {
 
 // PublishOrderCreate sends the order creation message to RabbitMQ
 func (p *Producer) PublishOrderCreate(ctx context.Context, payload interface{}) error {
+	return p.publish(ctx, OrderExchange, OrderCreateKey, payload, 0)
+}
+
+// PublishDelayedOrderTimeout sends a delayed message to RabbitMQ for stock compensation
+func (p *Producer) PublishDelayedOrderTimeout(ctx context.Context, payload interface{}, delayMs int64) error {
+	return p.publish(ctx, DelayedExchange, OrderTimeoutKey, payload, delayMs)
+}
+
+func (p *Producer) publish(ctx context.Context, exchange, key string, payload interface{}, delayMs int64) error {
 	p.mu.Lock()
 	ch := p.ch
 	p.mu.Unlock()
@@ -116,19 +179,25 @@ func (p *Producer) PublishOrderCreate(ctx context.Context, payload interface{}) 
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal order event: %w", err)
+		return fmt.Errorf("failed to marshal event: %w", err)
+	}
+
+	headers := amqp.Table{}
+	if delayMs > 0 {
+		headers["x-delay"] = delayMs
 	}
 
 	return ch.PublishWithContext(
 		ctx,
-		OrderExchange,
-		OrderCreateKey,
+		exchange,
+		key,
 		false, // mandatory
 		false, // immediate
 		amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
 			Timestamp:    time.Now(),
+			Headers:      headers,
 			Body:         body,
 		},
 	)
