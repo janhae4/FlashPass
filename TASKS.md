@@ -48,7 +48,7 @@
   - [x] One-click "Pre-warm Stock" and "Restock Event" buttons for live interview presentations.
 
 ## Phase 6: Benchmark & Load Testing with k6
-- [ ] 6.1 Write `load-test.js` targeting 20,000 virtual requests hitting 1,000 inventory stock.
-- [ ] 6.2 Execute test and collect metrics: RPS, p95/p99 latency, HTTP 202 count vs HTTP 409 count.
-- [ ] 6.3 Verify PostgreSQL count: Exactly 1,000 orders created (0 overselling).
-- [ ] 6.4 Generate `BENCHMARK.md` report with graphs and summary for GitHub README.
+- [x] 6.1 Write `load-test.js` targeting 20,000 virtual requests hitting 1,000 inventory stock.
+- [x] 6.2 Execute test and collect metrics: RPS, p95/p99 latency, HTTP 202 count vs HTTP 409 count.
+- [x] 6.3 Verify PostgreSQL count: Exactly 1,000 orders created (0 overselling).
+- [x] 6.4 Generate `BENCHMARK.md` report with graphs and summary for GitHub README.
