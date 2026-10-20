@@ -19,13 +19,13 @@
 - [x] 2.3 Implement Redis client with Connection Pool and Lua Script loader.
 
 ## Phase 3: High-Concurrency Core API Service
-- [ ] 3.1 Implement Admin Pre-warm Endpoint `POST /api/v1/admin/events/:id/prewarm` (loads stock into Redis).
-- [ ] 3.2 Implement Flash Sale Booking Endpoint `POST /api/v1/tickets/book`:
-  - Validate input payload & idempotency key.
-  - Execute Redis atomic Lua script.
-  - Publish `order.create` event to RabbitMQ.
-  - Return `202 Accepted` with reservation token.
-- [ ] 3.3 Implement `GET /api/v1/events/:id/stock` for live inventory inspection.
+- [x] 3.1 Implement Admin Pre-warm Endpoint `POST /api/v1/admin/events/:id/prewarm` (loads stock into Redis).
+- [x] 3.2 Implement Flash Sale Booking Endpoint `POST /api/v1/tickets/book`:
+  - [x] Validate input payload & idempotency key.
+  - [x] Execute Redis atomic Lua script.
+  - [x] Publish `order.create` event to RabbitMQ.
+  - [x] Return `202 Accepted` with reservation token.
+- [x] 3.3 Implement `GET /api/v1/events/:id/stock` for live inventory inspection.
 
 ## Phase 4: Asynchronous Processing & Stock Compensation
 - [ ] 4.1 Implement RabbitMQ Order Consumer to write orders into PostgreSQL.
