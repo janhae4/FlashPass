@@ -23,7 +23,12 @@ import {
   Trash2,
   Sliders,
   CheckCircle,
+  BarChart3,
+  PieChart,
+  HelpCircle,
+  FlaskConical,
 } from 'lucide-react';
+import EdgeCasesLab from '@/components/edge-cases/EdgeCasesLab';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8081';
 const DEFAULT_EVENT_ID = process.env.NEXT_PUBLIC_EVENT_ID || 'e9b8849b-7e61-4648-936c-941a329fa9c1';
@@ -74,7 +79,7 @@ export interface BenchmarkResult {
 }
 
 export default function FlashPassApp() {
-  const [activeTab, setActiveTab] = useState<'booking' | 'admin' | 'benchmark'>('booking');
+  const [activeTab, setActiveTab] = useState<'booking' | 'admin' | 'benchmark' | 'edge-cases'>('edge-cases');
   const [eventId] = useState<string>(DEFAULT_EVENT_ID);
   const [eventData, setEventData] = useState<EventData | null>(null);
   const [stock, setStock] = useState<number>(1000);
@@ -214,13 +219,22 @@ export default function FlashPassApp() {
     return () => clearInterval(timer);
   }, [reservation, paymentStatus, fetchStock]);
 
-  // Action: Book Ticket (Flash Sale Single Purchase)
   const handleBookTicket = async () => {
     setLoading(true);
     setErrorMsg(null);
     setSuccessMsg(null);
 
-    const idempotencyKey = crypto.randomUUID();
+    let idempotencyKey = '';
+    if (typeof window !== 'undefined') {
+      const sessionKeyName = `flashpass_session_${eventId}_${userId}`;
+      idempotencyKey = sessionStorage.getItem(sessionKeyName) || '';
+      if (!idempotencyKey) {
+        idempotencyKey = crypto.randomUUID();
+        sessionStorage.setItem(sessionKeyName, idempotencyKey);
+      }
+    } else {
+      idempotencyKey = crypto.randomUUID();
+    }
 
     try {
       const res = await fetch(`${API_BASE}/api/v1/tickets/book`, {
@@ -271,6 +285,9 @@ export default function FlashPassApp() {
       if (res.ok) {
         setPaymentStatus('paid');
         setSuccessMsg('Thanh toán thành công! Vé VIP của bạn đã được xuất.');
+        if (typeof window !== 'undefined') {
+          sessionStorage.removeItem(`flashpass_session_${eventId}_${userId}`);
+        }
         fetchStock();
       } else {
         setErrorMsg(data.error || 'Thanh toán thất bại.');
@@ -285,45 +302,6 @@ export default function FlashPassApp() {
     }
   };
 
-  // Action: Admin Prewarm
-  const handleAdminPrewarm = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/v1/admin/events/${eventId}/prewarm`, {
-        method: 'POST',
-      });
-      if (res.ok) {
-        setSuccessMsg('Pre-warm thành công! Kho vé đã nạp vào Redis RAM.');
-        fetchMetrics();
-        fetchStock();
-      }
-    } catch {
-      setErrorMsg('Pre-warm thất bại.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Action: Admin Restock & Reset
-  const handleAdminReset = async (customTickets?: number) => {
-    setLoading(true);
-    const ticketsCount = customTickets || 1000;
-    try {
-      const res = await fetch(`${API_BASE}/api/v1/admin/events/${eventId}/reset?tickets=${ticketsCount}`, {
-        method: 'POST',
-      });
-      if (res.ok) {
-        setSuccessMsg(`Reset sự kiện thành công! ${ticketsCount.toLocaleString()} vé đã được phục hồi.`);
-        setReservation(null);
-        fetchMetrics();
-        fetchStock();
-      }
-    } catch {
-      setErrorMsg('Reset thất bại.');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   // ==========================================
   // PHASE 6: IN-BROWSER K6 BENCHMARK ENGINE
@@ -513,43 +491,23 @@ export default function FlashPassApp() {
               </span>
             </div>
           </div>
-
-          {/* 3-Tab Switcher */}
-          <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 p-1 rounded-xl">
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setActiveTab('booking')}
-              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-all ${
-                activeTab === 'booking'
-                  ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
+              onClick={() => setActiveTab('edge-cases')}
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-all ${activeTab === 'edge-cases'
+                ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-indigo-400 hover:text-indigo-200'
+                }`}
             >
-              <Ticket className="w-4 h-4" />
-              Mua Vé
+              <FlaskConical className="w-4 h-4" />
+              Lab Lỗi Phân Tán
             </button>
-
-            <button
-              onClick={() => {
-                setActiveTab('admin');
-                fetchMetrics();
-              }}
-              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-all ${
-                activeTab === 'admin'
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Cpu className="w-4 h-4" />
-              Admin
-            </button>
-
             <button
               onClick={() => setActiveTab('benchmark')}
-              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-all ${
-                activeTab === 'benchmark'
-                  ? 'bg-gradient-to-r from-amber-500 to-rose-600 text-white shadow-md shadow-rose-600/30'
-                  : 'text-amber-400 hover:text-amber-200'
-              }`}
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-all ${activeTab === 'benchmark'
+                ? 'bg-gradient-to-r from-amber-500 to-rose-600 text-white shadow-md shadow-rose-600/30'
+                : 'text-amber-400 hover:text-amber-200'
+                }`}
             >
               <Activity className="w-4 h-4" />
               k6 Live Benchmark
@@ -585,632 +543,498 @@ export default function FlashPassApp() {
           </div>
         )}
 
-        {activeTab === 'booking' && (
-          /* TAB 1: EVENT BOOKING CLIENT */
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <div className="lg:col-span-2 space-y-6">
-              <div className="relative rounded-2xl overflow-hidden border border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 p-6 md:p-8 shadow-2xl">
-                <div className="absolute top-0 right-0 w-96 h-96 bg-purple-600/10 rounded-full blur-3xl pointer-events-none" />
-                <div className="absolute -bottom-10 -left-10 w-80 h-80 bg-rose-600/10 rounded-full blur-3xl pointer-events-none" />
+        {/* Tab 1: Distributed Edge Cases Lab */}
+        {activeTab === 'edge-cases' && <EdgeCasesLab />}
 
-                <div className="relative z-10">
-                  <div className="flex items-center gap-2 mb-3">
-                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/30">
-                      <Flame className="w-3.5 h-3.5 fill-rose-400" />
-                      FLASH SALE ĐANG MỞ
-                    </span>
-                    <span className="text-xs text-slate-400">
-                      Sân vận động Quốc gia Mỹ Đình • VIP Zone
-                    </span>
-                  </div>
-
-                  <h1 className="text-2xl md:text-4xl font-extrabold tracking-tight text-white mb-3">
-                    {eventData?.title || 'Taylor Swift: The Eras Tour - FlashPass VIP'}
-                  </h1>
-
-                  <p className="text-slate-400 text-sm md:text-base leading-relaxed mb-6">
-                    Trải nghiệm đêm nhạc đỉnh cao với tấm vé VIP FlashPass. Quyền lợi bao gồm khu vực đứng sát sân khấu VIP Lounge, soundcheck riêng tư cùng Taylor Swift và set quà tặng độc quyền.
-                  </p>
-
-                  <div className="grid grid-cols-3 gap-4 pt-4 border-t border-slate-800/80">
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-purple-950/60 border border-purple-800/50 flex items-center justify-center text-purple-400">
-                        <Clock className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs text-slate-400">Thời gian bán</div>
-                        <div className="text-xs font-semibold text-slate-200">20:00 Hôm Nay</div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-emerald-950/60 border border-emerald-800/50 flex items-center justify-center text-emerald-400">
-                        <ShieldCheck className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs text-slate-400">Giới hạn mua</div>
-                        <div className="text-xs font-semibold text-slate-200">1 Vé / Tài Khoản</div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-blue-950/60 border border-blue-800/50 flex items-center justify-center text-blue-400">
-                        <Users className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs text-slate-400">Tài khoản</div>
-                        <div className="text-xs font-semibold text-slate-200">{userId || 'Khách'}</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-bold text-lg text-white">Quyền Lợi Vé VIP Flash Sale</h3>
-                  <span className="text-xs text-purple-400 bg-purple-950/80 px-2.5 py-1 rounded-md border border-purple-800/40">
-                    Hạng Vé Duy Nhất
-                  </span>
-                </div>
-
-                <ul className="space-y-2.5 text-sm text-slate-300">
-                  <li className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Lối đi ưu tiên riêng biệt (VIP Fast Track) không cần xếp hàng.</span>
-                  </li>
-                  <li className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Thẻ đeo thẻ bài hologram độc bản The Eras Tour.</span>
-                  </li>
-                  <li className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Quyền giữ chỗ 10 phút để hoàn tất thanh toán trước khi vé được trả về kho.</span>
-                  </li>
-                </ul>
-              </div>
-            </div>
-
-            <div className="space-y-6">
-              <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6 space-y-6 shadow-xl sticky top-24">
-                <div>
-                  <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">
-                    Giá niêm yết
-                  </span>
-                  <div className="flex items-baseline gap-2 mt-1">
-                    <span className="text-3xl md:text-4xl font-extrabold text-white">
-                      6.000.000₫
-                    </span>
-                    <span className="text-sm text-slate-400">/ 1 vé VIP</span>
-                  </div>
-                </div>
-
-                <div className="space-y-2 pt-2 border-t border-slate-800">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="flex items-center gap-1.5 text-slate-300 font-medium">
-                      <Database className="w-3.5 h-3.5 text-purple-400" />
-                      Kho Vé Thời Gian Thực (Redis RAM):
-                    </span>
-                    <span
-                      className={`font-mono font-bold ${
-                        stock === 0
-                          ? 'text-rose-400'
-                          : stock < 100
-                          ? 'text-amber-400'
-                          : 'text-emerald-400'
-                      }`}
-                    >
-                      {stock.toLocaleString()} / {totalTickets.toLocaleString()}
-                    </span>
-                  </div>
-
-                  <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden p-0.5 border border-slate-700">
-                    <div
-                      className={`h-full rounded-full transition-all duration-500 ${
-                        stock === 0
-                          ? 'bg-rose-500'
-                          : stock < 100
-                          ? 'bg-amber-500'
-                          : 'bg-gradient-to-r from-emerald-500 to-purple-500'
-                      }`}
-                      style={{ width: `${stockPercentage}%` }}
-                    />
-                  </div>
-
-                  <div className="flex justify-between items-center text-[11px] text-slate-400 pt-1">
-                    <span>
-                      {stock === 0
-                        ? 'Đã cháy vé!'
-                        : stock < 100
-                        ? 'Sắp hết vé cực nhanh!'
-                        : 'Còn lại trong kho'}
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                      Live Polling 1.5s
-                    </span>
-                  </div>
-                </div>
-
-                <button
-                  onClick={handleBookTicket}
-                  disabled={loading || stock === 0}
-                  className={`w-full py-4 px-6 rounded-xl font-bold text-base flex items-center justify-center gap-2 transition-all transform active:scale-95 shadow-xl ${
-                    stock === 0
-                      ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
-                      : 'bg-gradient-to-r from-purple-600 via-pink-600 to-rose-600 hover:from-purple-500 hover:to-rose-500 text-white shadow-purple-600/30'
-                  }`}
-                >
-                  {loading ? (
-                    <>
-                      <RefreshCw className="w-5 h-5 animate-spin" />
-                      Đang xử lý đặt chỗ...
-                    </>
-                  ) : stock === 0 ? (
-                    'HẾT VÉ (SOLD OUT)'
-                  ) : (
-                    <>
-                      <Zap className="w-5 h-5 fill-white" />
-                      MUA VÉ NGAY
-                      <ChevronRight className="w-4 h-4 ml-auto" />
-                    </>
-                  )}
-                </button>
-
-                <div className="text-[11px] text-slate-400 text-center leading-relaxed">
-                  Bảo vệ chống mua đúp bằng Idempotency Key tự động. Xác thực giữ chỗ nguyên tử trong Redis Lua Script &lt; 2ms.
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'admin' && (
-          /* TAB 2: ADMIN LIVE MONITORING DASHBOARD */
-          <div className="space-y-8">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
-              <div>
-                <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-                  <Cpu className="w-6 h-6 text-indigo-400" />
-                  Bảng Giám Sát Hiệu Năng & Kho Vé (Live Monitor)
-                </h2>
-                <p className="text-slate-400 text-sm mt-1">
-                  Đo lường thời gian thực: Tồn kho Redis RAM vs Đơn hàng bền vững PostgreSQL (Cam kết Overselling 0.00%)
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleAdminPrewarm}
-                  disabled={loading}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-300 text-sm font-semibold transition-all"
-                >
-                  <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                  Pre-warm Stock vào Redis
-                </button>
-                <button
-                  onClick={() => handleAdminReset(1000)}
-                  disabled={loading}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/40 text-rose-300 text-sm font-semibold transition-all"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                  Restock & Reset Sự Kiện (1,000 Vé)
-                </button>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-              <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-2">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Kho Vé RAM (Redis)</span>
-                  <Zap className="w-4 h-4 text-amber-400" />
-                </div>
-                <div className="text-3xl font-extrabold text-white font-mono">
-                  {stock.toLocaleString()}
-                </div>
-                <div className="text-[11px] text-slate-400 flex items-center gap-1.5 pt-1">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  Kiểm tra nguyên tử Lua Script
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-2">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Đang Giữ Chỗ (Chờ Trả)</span>
-                  <Timer className="w-4 h-4 text-purple-400" />
-                </div>
-                <div className="text-3xl font-extrabold text-purple-400 font-mono">
-                  {metrics?.pending_orders ?? 0}
-                </div>
-                <div className="text-[11px] text-slate-400">Thời hạn giữ 10 phút</div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-2">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Đã Thanh Toán (PAID)</span>
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                </div>
-                <div className="text-3xl font-extrabold text-emerald-400 font-mono">
-                  {metrics?.paid_orders ?? 0}
-                </div>
-                <div className="text-[11px] text-slate-400">Đơn hàng hoàn tất</div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-2">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Hết Hạn & Hoàn Vé</span>
-                  <RotateCcw className="w-4 h-4 text-rose-400" />
-                </div>
-                <div className="text-3xl font-extrabold text-rose-400 font-mono">
-                  {metrics?.expired_orders ?? 0}
-                </div>
-                <div className="text-[11px] text-slate-400">Đã trả stock về kho</div>
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-800 bg-gradient-to-r from-slate-900 via-indigo-950/20 to-slate-900 p-6 space-y-4">
-              <h3 className="font-bold text-base text-white flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-emerald-400" />
-                Kiểm Chứng Bất Biến Hệ Thống (Zero Overselling Guarantee)
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800">
-                  <div className="text-slate-400 text-xs">Tổng Vé Ban Đầu</div>
-                  <div className="text-xl font-bold text-white mt-1">
-                    {totalTickets.toLocaleString()}
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800">
-                  <div className="text-slate-400 text-xs">Tồn Kho + Vé Đã/Đang Giữ</div>
-                  <div className="text-xl font-bold text-indigo-400 mt-1">
-                    {(stock + (metrics?.pending_orders ?? 0) + (metrics?.paid_orders ?? 0)).toLocaleString()}
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800">
-                  <div className="text-slate-400 text-xs">Trạng Thái Bán Âm</div>
-                  <div className="text-xl font-bold text-emerald-400 mt-1 flex items-center gap-1.5">
-                    <CheckCircle2 className="w-5 h-5" />
-                    0.00% (An Toàn Tuyệt Đối)
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
+        {/* Tab 2: k6 Live Benchmark */}
         {activeTab === 'benchmark' && (
-          /* TAB 3: IN-BROWSER K6 BENCHMARK SIMULATOR & LOCALSTORAGE HISTORY */
           <div className="space-y-8">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                    k6 In-Browser Simulator
-                  </span>
-                  <span className="text-xs text-slate-400">Không ghi ô nhiễm Database</span>
-                </div>
-                <h2 className="text-2xl font-bold text-white flex items-center gap-2 mt-1">
-                  <Activity className="w-6 h-6 text-amber-400" />
-                  Mô Phỏng Trực Quan Tải Cao (Live Surge Benchmark)
-                </h2>
-                <p className="text-slate-400 text-sm mt-1">
-                  Chọn số lượng vé và số lượng requests để chạy stress test trực tiếp vào Redis Lua Script. Kết quả được lưu trên trình duyệt (LocalStorage).
-                </p>
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                  k6 In-Browser Simulator
+                </span>
+                <span className="text-xs text-slate-400">Không ghi ô nhiễm Database</span>
               </div>
-
-              {benchHistory.length > 0 && (
-                <button
-                  onClick={clearBenchmarkHistory}
-                  disabled={benchRunning}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-800 bg-slate-900 text-slate-400 hover:text-rose-400 hover:border-rose-900/50 text-xs transition-all"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Xóa Lịch Sử
-                </button>
-              )}
+              <h2 className="text-2xl font-bold text-white flex items-center gap-2 mt-1">
+                <Activity className="w-6 h-6 text-amber-400" />
+                Mô Phỏng Trực Quan Tải Cao (Live Surge Benchmark)
+              </h2>
+              <p className="text-slate-400 text-sm mt-1">
+                Chọn số lượng vé và số lượng requests để chạy stress test trực tiếp vào Redis Lua Script. Kết quả được lưu trên trình duyệt (LocalStorage).
+              </p>
             </div>
 
-            {/* Benchmark Configuration Panel */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 p-6 rounded-2xl border border-slate-800 bg-slate-900/60">
-              {/* Param 1: Target Stock */}
-              <div className="space-y-3">
-                <label className="text-xs font-bold text-slate-300 flex items-center gap-2">
-                  <Ticket className="w-4 h-4 text-purple-400" />
-                  1. Số Lượng Vé Kho (Inventory Stock)
-                </label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {[200, 500, 1000, 2000].map((num) => (
-                    <button
-                      key={num}
-                      type="button"
-                      disabled={benchRunning}
-                      onClick={() => setBenchStock(num)}
-                      className={`py-2 rounded-lg text-xs font-bold border transition-all ${
-                        benchStock === num
-                          ? 'bg-purple-600 border-purple-500 text-white'
-                          : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      {num}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="number"
-                  min="10"
-                  max="10000"
-                  disabled={benchRunning}
-                  value={benchStock}
-                  onChange={(e) => setBenchStock(Math.max(1, parseInt(e.target.value) || 0))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm font-mono text-white"
-                />
-              </div>
-
-              {/* Param 2: Total Requests */}
-              <div className="space-y-3">
-                <label className="text-xs font-bold text-slate-300 flex items-center gap-2">
-                  <Zap className="w-4 h-4 text-amber-400" />
-                  2. Tổng Số Requests Đột Biến (Surge Req)
-                </label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {[1000, 2000, 5000, 10000].map((num) => (
-                    <button
-                      key={num}
-                      type="button"
-                      disabled={benchRunning}
-                      onClick={() => setBenchRequests(num)}
-                      className={`py-2 rounded-lg text-xs font-bold border transition-all ${
-                        benchRequests === num
-                          ? 'bg-amber-600 border-amber-500 text-white'
-                          : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      {num.toLocaleString()}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="number"
-                  min="50"
-                  max="50000"
-                  disabled={benchRunning}
-                  value={benchRequests}
-                  onChange={(e) => setBenchRequests(Math.max(1, parseInt(e.target.value) || 0))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm font-mono text-white"
-                />
-              </div>
-
-              {/* Param 3: Concurrency */}
-              <div className="space-y-3">
-                <label className="text-xs font-bold text-slate-300 flex items-center gap-2">
-                  <Sliders className="w-4 h-4 text-emerald-400" />
-                  3. Số Luồng Ảo Đồng Thời (VUs)
-                </label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {[25, 50, 100].map((num) => (
-                    <button
-                      key={num}
-                      type="button"
-                      disabled={benchRunning}
-                      onClick={() => setBenchConcurrency(num)}
-                      className={`py-2 rounded-lg text-xs font-bold border transition-all ${
-                        benchConcurrency === num
-                          ? 'bg-emerald-600 border-emerald-500 text-white'
-                          : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      {num} VUs
-                    </button>
-                  ))}
-                </div>
-                <div className="text-[11px] text-slate-400 pt-1 leading-relaxed">
-                  Worker pool song song dispatching HTTP requests qua HTTP keep-alive.
-                </div>
-              </div>
-            </div>
-
-            {/* Run Trigger Button */}
-            <div className="flex flex-col items-center justify-center gap-3">
+            {benchHistory.length > 0 && (
               <button
-                onClick={runLiveBenchmark}
+                onClick={clearBenchmarkHistory}
                 disabled={benchRunning}
-                className={`py-4 px-10 rounded-2xl font-extrabold text-base flex items-center gap-3 shadow-2xl transition-all transform active:scale-95 ${
-                  benchRunning
-                    ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed'
-                    : 'bg-gradient-to-r from-amber-500 via-rose-600 to-purple-600 hover:from-amber-400 hover:to-purple-500 text-white shadow-rose-600/30'
-                }`}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-800 bg-slate-900 text-slate-400 hover:text-rose-400 hover:border-rose-900/50 text-xs transition-all"
               >
-                {benchRunning ? (
-                  <>
-                    <RefreshCw className="w-5 h-5 animate-spin text-amber-400" />
-                    ĐANG BẮN {benchRequests.toLocaleString()} REQUESTS VÀO KHO {benchStock} VÉ...
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-5 h-5 fill-white" />
-                    CHẠY BENCHMARK TRỰC TIẾP ({benchRequests.toLocaleString()} REQ / {benchStock} VÉ)
-                  </>
-                )}
+                <Trash2 className="w-3.5 h-3.5" />
+                Xóa Lịch Sử
               </button>
-              <span className="text-xs text-slate-400">
-                Tự động reset kho vé tương ứng trước khi bắn & kiểm chứng Bán âm (Overselling = 0).
-              </span>
+            )}
+          </div>
+
+          {/* Benchmark Configuration Panel */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 p-6 rounded-2xl border border-slate-800 bg-slate-900/60">
+            {/* Param 1: Target Stock */}
+            <div className="space-y-3">
+              <label className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                <Ticket className="w-4 h-4 text-purple-400" />
+                1. Số Lượng Vé Kho (Inventory Stock)
+              </label>
+              <div className="grid grid-cols-4 gap-1.5">
+                {[200, 500, 1000, 2000].map((num) => (
+                  <button
+                    key={num}
+                    type="button"
+                    disabled={benchRunning}
+                    onClick={() => setBenchStock(num)}
+                    className={`py-2 rounded-lg text-xs font-bold border transition-all ${benchStock === num
+                      ? 'bg-purple-600 border-purple-500 text-white'
+                      : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-white'
+                      }`}
+                  >
+                    {num}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="number"
+                min="10"
+                max="10000"
+                disabled={benchRunning}
+                value={benchStock}
+                onChange={(e) => setBenchStock(Math.max(1, parseInt(e.target.value) || 0))}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm font-mono text-white"
+              />
             </div>
 
-            {/* Live Real-time Progress (while running) */}
-            {benchRunning && benchProgress && (
-              <div className="rounded-2xl border border-amber-500/40 bg-slate-900 p-6 space-y-4 animate-in fade-in">
-                <div className="flex justify-between items-center text-sm">
-                  <span className="font-bold text-amber-400 flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
-                    Đang chạy: {benchProgress.completed.toLocaleString()} / {benchProgress.total.toLocaleString()} Requests
-                  </span>
-                  <span className="font-mono text-emerald-400 font-bold text-base">
-                    ~{benchProgress.currentRps.toLocaleString()} RPS
-                  </span>
-                </div>
+            {/* Param 2: Total Requests */}
+            <div className="space-y-3">
+              <label className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                <Zap className="w-4 h-4 text-amber-400" />
+                2. Tổng Số Requests Đột Biến (Surge Req)
+              </label>
+              <div className="grid grid-cols-4 gap-1.5">
+                {[1000, 2000, 5000, 10000].map((num) => (
+                  <button
+                    key={num}
+                    type="button"
+                    disabled={benchRunning}
+                    onClick={() => setBenchRequests(num)}
+                    className={`py-2 rounded-lg text-xs font-bold border transition-all ${benchRequests === num
+                      ? 'bg-amber-600 border-amber-500 text-white'
+                      : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-white'
+                      }`}
+                  >
+                    {num.toLocaleString()}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="number"
+                min="50"
+                max="50000"
+                disabled={benchRunning}
+                value={benchRequests}
+                onChange={(e) => setBenchRequests(Math.max(1, parseInt(e.target.value) || 0))}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm font-mono text-white"
+              />
+            </div>
 
-                <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden border border-slate-700">
-                  <div
-                    className="h-full bg-gradient-to-r from-amber-500 to-rose-500 transition-all duration-100"
-                    style={{ width: `${(benchProgress.completed / benchProgress.total) * 100}%` }}
-                  />
-                </div>
+            {/* Param 3: Concurrency */}
+            <div className="space-y-3">
+              <label className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-emerald-400" />
+                3. Số Luồng Ảo Đồng Thời (VUs)
+              </label>
+              <div className="grid grid-cols-3 gap-1.5">
+                {[25, 50, 100].map((num) => (
+                  <button
+                    key={num}
+                    type="button"
+                    disabled={benchRunning}
+                    onClick={() => setBenchConcurrency(num)}
+                    className={`py-2 rounded-lg text-xs font-bold border transition-all ${benchConcurrency === num
+                      ? 'bg-emerald-600 border-emerald-500 text-white'
+                      : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-white'
+                      }`}
+                  >
+                    {num} VUs
+                  </button>
+                ))}
+                <input
+                  type="number"
+                  min="0"
+                  max={benchRequests}
+                  disabled={benchRunning}
+                  value={benchConcurrency}
+                  onChange={(e) => setBenchConcurrency(Math.max(1, parseInt(e.target.value) || 0))}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm font-mono text-white"
+                />
+              </div>
+              <div className="text-[11px] text-slate-400 pt-1 leading-relaxed">
+                Worker pool song song dispatching HTTP requests qua HTTP keep-alive.
+              </div>
+            </div>
 
-                <div className="grid grid-cols-4 gap-3 text-center text-xs pt-2">
-                  <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
-                    <div className="text-slate-400">202 Accepted</div>
-                    <div className="text-lg font-bold text-emerald-400 font-mono mt-1">
-                      {benchProgress.accepted}
-                    </div>
-                  </div>
-                  <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
-                    <div className="text-slate-400">409 Sold Out</div>
-                    <div className="text-lg font-bold text-amber-400 font-mono mt-1">
-                      {benchProgress.soldOut}
-                    </div>
-                  </div>
-                  <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
-                    <div className="text-slate-400">p95 Latency</div>
-                    <div className="text-lg font-bold text-indigo-400 font-mono mt-1">
-                      {benchProgress.p95Latency} ms
-                    </div>
-                  </div>
-                  <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
-                    <div className="text-slate-400">5xx Errors</div>
-                    <div className="text-lg font-bold text-rose-400 font-mono mt-1">
-                      {benchProgress.errors}
-                    </div>
-                  </div>
+            {benchConcurrency > 100 && (
+              <div className="md:col-span-3 p-3.5 rounded-xl bg-amber-950/40 border border-amber-800/80 text-amber-300 text-xs flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold">Lưu ý về số luồng ảo ({benchConcurrency} VUs):</span> Trình duyệt giới hạn tối đa 6 kết nối HTTP/1.1 đồng thời per host. Đặt VUs quá cao (&gt; 100) sẽ gây cạn kiệt socket client (ERR_INSUFFICIENT_RESOURCES), khiến nhiều request bị hủy ở trình duyệt trước khi tới backend. Khuyến nghị chạy <strong>25 - 100 VUs</strong> trên web, hoặc dùng <strong>CLI k6</strong> cho 1,000+ VUs!
                 </div>
               </div>
             )}
+          </div>
 
-            {/* Last Benchmark Summary Card */}
-            {lastResult && !benchRunning && (
-              <div className="rounded-2xl border border-emerald-500/40 bg-gradient-to-b from-slate-900 to-slate-950 p-6 space-y-6 shadow-2xl">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-slate-800 pb-4">
-                  <div>
-                    <span className="text-xs text-emerald-400 font-bold bg-emerald-950/80 px-2.5 py-1 rounded-md border border-emerald-800/60">
-                      KẾT QUẢ ĐO VỪA CHẠY
-                    </span>
-                    <h3 className="text-xl font-bold text-white mt-2">
-                      Đã hoàn tất {lastResult.totalRequests.toLocaleString()} requests trong {lastResult.durationMs}ms
-                    </h3>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-xs text-slate-400">Thông lượng trung bình</div>
-                    <div className="text-3xl font-extrabold text-emerald-400 font-mono">
-                      {lastResult.rps.toLocaleString()} RPS
-                    </div>
-                  </div>
-                </div>
+          {/* Run Trigger Button */}
+          <div className="flex flex-col items-center justify-center gap-3">
+            <button
+              onClick={runLiveBenchmark}
+              disabled={benchRunning}
+              className={`py-4 px-10 rounded-2xl font-extrabold text-base flex items-center gap-3 shadow-2xl transition-all transform active:scale-95 ${benchRunning
+                ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed'
+                : 'bg-gradient-to-r from-amber-500 via-rose-600 to-purple-600 hover:from-amber-400 hover:to-purple-500 text-white shadow-rose-600/30'
+                }`}
+            >
+              {benchRunning ? (
+                <>
+                  <RefreshCw className="w-5 h-5 animate-spin text-amber-400" />
+                  ĐANG BẮN {benchRequests.toLocaleString()} REQUESTS VÀO KHO {benchStock} VÉ...
+                </>
+              ) : (
+                <>
+                  <Play className="w-5 h-5 fill-white" />
+                  CHẠY BENCHMARK TRỰC TIẾP ({benchRequests.toLocaleString()} REQ / {benchStock} VÉ)
+                </>
+              )}
+            </button>
+            <span className="text-xs text-slate-400">
+              Tự động reset kho vé tương ứng trước khi bắn & kiểm chứng Bán âm (Overselling = 0).
+            </span>
+          </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                  <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="text-xs text-slate-400">Vé Bán Thành Công (202)</div>
-                    <div className="text-2xl font-extrabold text-emerald-400 font-mono mt-1">
-                      {lastResult.accepted202.toLocaleString()}
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-1">Khớp kho {lastResult.targetStock}</div>
-                  </div>
-
-                  <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="text-xs text-slate-400">Fail-Fast Từ Chối (409)</div>
-                    <div className="text-2xl font-extrabold text-amber-400 font-mono mt-1">
-                      {lastResult.soldOut409.toLocaleString()}
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-1">Chặn ngay tại RAM</div>
-                  </div>
-
-                  <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="text-xs text-slate-400">Độ Trễ p95 / p99</div>
-                    <div className="text-xl font-extrabold text-indigo-400 font-mono mt-1">
-                      {lastResult.p95Latency}ms / {lastResult.p99Latency}ms
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-1">Avg: {lastResult.avgLatency}ms</div>
-                  </div>
-
-                  <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="text-xs text-slate-400">Tỷ Lệ Bán Âm (Overselling)</div>
-                    <div className="text-2xl font-extrabold text-emerald-400 font-mono mt-1 flex items-center gap-1.5">
-                      <CheckCircle className="w-6 h-6 text-emerald-400" />
-                      0.00%
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-1">An toàn tuyệt đối</div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Benchmark History Log (Stored in localStorage) */}
-            <div className="space-y-4 pt-4 border-t border-slate-800">
-              <div className="flex items-center justify-between">
-                <h3 className="font-bold text-base text-white flex items-center gap-2">
-                  <History className="w-5 h-5 text-indigo-400" />
-                  Lịch Sử Các Lần Chạy Benchmark (Lưu Trực Tiếp Trên Trình Duyệt)
-                </h3>
-                <span className="text-xs text-slate-400">
-                  {benchHistory.length} lần chạy đã lưu (LocalStorage)
+          {/* Live Real-time Progress (while running) */}
+          {benchRunning && benchProgress && (
+            <div className="rounded-2xl border border-amber-500/40 bg-slate-900 p-6 space-y-4 animate-in fade-in">
+              <div className="flex justify-between items-center text-sm">
+                <span className="font-bold text-amber-400 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
+                  Đang chạy: {benchProgress.completed.toLocaleString()} / {benchProgress.total.toLocaleString()} Requests
+                </span>
+                <span className="font-mono text-emerald-400 font-bold text-base">
+                  ~{benchProgress.currentRps.toLocaleString()} RPS
                 </span>
               </div>
 
-              {benchHistory.length === 0 ? (
-                <div className="p-8 text-center rounded-2xl border border-slate-800 bg-slate-900/40 text-slate-400 text-sm">
-                  Chưa có lượt chạy benchmark nào. Hãy chọn cấu hình phía trên và bấm &quot;CHẠY BENCHMARK TRỰC TIẾP&quot;!
+              <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden border border-slate-700">
+                <div
+                  className="h-full bg-gradient-to-r from-amber-500 to-rose-500 transition-all duration-100"
+                  style={{ width: `${(benchProgress.completed / benchProgress.total) * 100}%` }}
+                />
+              </div>
+
+              <div className="grid grid-cols-4 gap-3 text-center text-xs pt-2">
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
+                  <div className="text-slate-400">202 Accepted</div>
+                  <div className="text-lg font-bold text-emerald-400 font-mono mt-1">
+                    {benchProgress.accepted}
+                  </div>
                 </div>
-              ) : (
-                <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/60">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-900 border-b border-slate-800 text-slate-400 uppercase tracking-wider">
-                      <tr>
-                        <th className="p-3">Thời gian</th>
-                        <th className="p-3">Cấu hình (Vé / Req / VUs)</th>
-                        <th className="p-3">Thời gian chạy</th>
-                        <th className="p-3">Thông lượng (RPS)</th>
-                        <th className="p-3">Độ trễ p95</th>
-                        <th className="p-3">202 / 409</th>
-                        <th className="p-3">Bán âm</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800 font-mono text-slate-300">
-                      {benchHistory.map((run, idx) => (
-                        <tr key={run.id} className="hover:bg-slate-800/40 transition-colors">
-                          <td className="p-3 text-slate-400 font-sans">
-                            <span className="font-bold text-white">#{benchHistory.length - idx}</span>{' '}
-                            ({run.timestamp})
-                          </td>
-                          <td className="p-3">
-                            <span className="text-purple-400">{run.targetStock} vé</span> •{' '}
-                            <span className="text-amber-400">{run.totalRequests.toLocaleString()} req</span> •{' '}
-                            <span className="text-slate-400">{run.concurrency} VUs</span>
-                          </td>
-                          <td className="p-3">{run.durationMs}ms</td>
-                          <td className="p-3 font-bold text-emerald-400">
-                            {run.rps.toLocaleString()} req/s
-                          </td>
-                          <td className="p-3 text-indigo-400">{run.p95Latency}ms</td>
-                          <td className="p-3">
-                            <span className="text-emerald-400">{run.accepted202}</span> /{' '}
-                            <span className="text-amber-400">{run.soldOut409}</span>
-                          </td>
-                          <td className="p-3">
-                            <span className="inline-flex items-center gap-1 text-emerald-400 font-bold font-sans text-[11px] bg-emerald-950/60 border border-emerald-800/50 px-2 py-0.5 rounded-full">
-                              <CheckCircle className="w-3 h-3" />
-                              0.00%
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
+                  <div className="text-slate-400">409 Sold Out</div>
+                  <div className="text-lg font-bold text-amber-400 font-mono mt-1">
+                    {benchProgress.soldOut}
+                  </div>
                 </div>
-              )}
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
+                  <div className="text-slate-400">p95 Latency</div>
+                  <div className="text-lg font-bold text-indigo-400 font-mono mt-1">
+                    {benchProgress.p95Latency} ms
+                  </div>
+                </div>
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
+                  <div className="text-slate-400">5xx Errors</div>
+                  <div className="text-lg font-bold text-rose-400 font-mono mt-1">
+                    {benchProgress.errors}
+                  </div>
+                </div>
+              </div>
             </div>
+          )}
+
+          {/* Last Benchmark Summary Card */}
+          {lastResult && !benchRunning && (
+            <div className="rounded-2xl border border-emerald-500/40 bg-gradient-to-b from-slate-900 to-slate-950 p-6 space-y-6 shadow-2xl">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-slate-800 pb-4">
+                <div>
+                  <span className="text-xs text-emerald-400 font-bold bg-emerald-950/80 px-2.5 py-1 rounded-md border border-emerald-800/60">
+                    KẾT QUẢ ĐO VỪA CHẠY
+                  </span>
+                  <h3 className="text-xl font-bold text-white mt-2">
+                    Đã hoàn tất {lastResult.totalRequests.toLocaleString()} requests trong {lastResult.durationMs}ms
+                  </h3>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs text-slate-400">Thông lượng trung bình</div>
+                  <div className="text-3xl font-extrabold text-emerald-400 font-mono">
+                    {lastResult.rps.toLocaleString()} RPS
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
+                  <div className="text-xs text-slate-400">Vé Bán Thành Công (202)</div>
+                  <div className="text-2xl font-extrabold text-emerald-400 font-mono mt-1">
+                    {lastResult.accepted202.toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">Khớp kho {lastResult.targetStock}</div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
+                  <div className="text-xs text-slate-400">Fail-Fast Từ Chối (409)</div>
+                  <div className="text-2xl font-extrabold text-amber-400 font-mono mt-1">
+                    {lastResult.soldOut409.toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">Chặn ngay tại RAM</div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
+                  <div className="text-xs text-slate-400">Độ Trễ p95 / p99</div>
+                  <div className="text-xl font-extrabold text-indigo-400 font-mono mt-1">
+                    {lastResult.p95Latency}ms / {lastResult.p99Latency}ms
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">Avg: {lastResult.avgLatency}ms</div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
+                  <div className="text-xs text-slate-400">Tỷ Lệ Bán Âm (Overselling)</div>
+                  <div className="text-2xl font-extrabold text-emerald-400 font-mono mt-1 flex items-center gap-1.5">
+                    <CheckCircle className="w-6 h-6 text-emerald-400" />
+                    0.00%
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">An toàn tuyệt đối</div>
+                </div>
+              </div>
+
+              {/* Visual Graphs & Response Breakdown */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                {/* Latency Distribution Chart */}
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                      <BarChart3 className="w-4 h-4 text-indigo-400" />
+                      Phân Bố Độ Trễ (Latency Percentiles)
+                    </span>
+                    <span className="text-[11px] text-emerald-400 font-mono font-bold bg-emerald-950/70 border border-emerald-800/50 px-2 py-0.5 rounded">
+                      SLA &lt; 25ms
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 pt-1">
+                    {[
+                      { label: 'Min (Rejection)', val: lastResult.minLatency, color: 'bg-sky-400' },
+                      { label: 'p50 (Median)', val: lastResult.p50Latency, color: 'bg-indigo-400' },
+                      { label: 'Average (Trung bình)', val: lastResult.avgLatency, color: 'bg-purple-400' },
+                      { label: 'p95 (95% User)', val: lastResult.p95Latency, color: 'bg-amber-400' },
+                      { label: 'p99 (99% User)', val: lastResult.p99Latency, color: 'bg-rose-400' },
+                    ].map((item) => {
+                      const maxVal = Math.max(lastResult.p99Latency, 30);
+                      const widthPercent = Math.min(100, Math.max(8, (item.val / maxVal) * 100));
+                      return (
+                        <div key={item.label} className="space-y-1">
+                          <div className="flex justify-between text-[11px]">
+                            <span className="text-slate-400">{item.label}</span>
+                            <span className="font-mono font-bold text-white">{item.val}ms</span>
+                          </div>
+                          <div className="h-2 w-full bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                            <div
+                              className={`h-full ${item.color} rounded-full transition-all duration-500`}
+                              style={{ width: `${widthPercent}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Request Composition Chart */}
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+                  <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                    <PieChart className="w-4 h-4 text-emerald-400" />
+                    Cơ Cấu Kết Quả ({lastResult.totalRequests.toLocaleString()} Requests)
+                  </span>
+
+                  <div className="space-y-3 pt-1">
+                    {/* Stacked Bar */}
+                    <div className="h-6 w-full bg-slate-950 rounded-lg overflow-hidden flex border border-slate-800">
+                      {lastResult.accepted202 > 0 && (
+                        <div
+                          className="bg-emerald-500 h-full flex items-center justify-center text-[10px] font-bold text-black"
+                          style={{ width: `${(lastResult.accepted202 / lastResult.totalRequests) * 100}%` }}
+                          title={`202 Accepted: ${lastResult.accepted202}`}
+                        >
+                          {((lastResult.accepted202 / lastResult.totalRequests) * 100).toFixed(0)}%
+                        </div>
+                      )}
+                      {lastResult.soldOut409 > 0 && (
+                        <div
+                          className="bg-amber-500 h-full flex items-center justify-center text-[10px] font-bold text-black"
+                          style={{ width: `${(lastResult.soldOut409 / lastResult.totalRequests) * 100}%` }}
+                          title={`409 Sold Out: ${lastResult.soldOut409}`}
+                        >
+                          {((lastResult.soldOut409 / lastResult.totalRequests) * 100).toFixed(0)}%
+                        </div>
+                      )}
+                      {lastResult.errors5xx > 0 && (
+                        <div
+                          className="bg-rose-500 h-full flex items-center justify-center text-[10px] font-bold text-white"
+                          style={{ width: `${(lastResult.errors5xx / lastResult.totalRequests) * 100}%` }}
+                          title={`Errors: ${lastResult.errors5xx}`}
+                        >
+                          {((lastResult.errors5xx / lastResult.totalRequests) * 100).toFixed(0)}%
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 pt-1 text-center">
+                      <div className="p-2 rounded bg-slate-950/60 border border-slate-800">
+                        <div className="text-[10px] text-slate-400">202 Thành công</div>
+                        <div className="text-xs font-bold text-emerald-400 font-mono mt-0.5">
+                          {lastResult.accepted202.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-2 rounded bg-slate-950/60 border border-slate-800">
+                        <div className="text-[10px] text-slate-400">409 Fail-Fast</div>
+                        <div className="text-xs font-bold text-amber-400 font-mono mt-0.5">
+                          {lastResult.soldOut409.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-2 rounded bg-slate-950/60 border border-slate-800">
+                        <div className="text-[10px] text-slate-400">Lỗi Client / Socket</div>
+                        <div className="text-xs font-bold text-rose-400 font-mono mt-0.5">
+                          {lastResult.errors5xx.toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-[11px] text-slate-400 leading-relaxed bg-slate-950/40 p-2.5 rounded-lg border border-slate-800/80">
+                      🛡️ <span className="text-slate-300 font-medium">Bảo vệ cơ sở dữ liệu:</span> {lastResult.soldOut409.toLocaleString()} requests được từ chối ngay lập tức tại RAM Redis trong &lt; 1ms mà không chạm PostgreSQL.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Matplotlib k6 Visual Dashboard */}
+              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                    <Activity className="w-4 h-4 text-amber-400" />
+                    Đồ Thị k6 Benchmark Trực Quan Hóa (Python Matplotlib Engine)
+                  </span>
+                  <a
+                    href="/benchmark_chart.png"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-indigo-400 hover:text-indigo-300 underline"
+                  >
+                    Xem ảnh đầy đủ ↗
+                  </a>
+                </div>
+                <div className="rounded-lg overflow-hidden border border-slate-800 bg-slate-950 flex items-center justify-center p-2">
+                  <img
+                    src="/benchmark_chart.png"
+                    alt="FlashPass Benchmark Performance Chart"
+                    className="w-full max-h-[360px] object-contain rounded"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Benchmark History Log (Stored in localStorage) */}
+          <div className="space-y-4 pt-4 border-t border-slate-800">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-base text-white flex items-center gap-2">
+                <History className="w-5 h-5 text-indigo-400" />
+                Lịch Sử Các Lần Chạy Benchmark (Lưu Trực Tiếp Trên Trình Duyệt)
+              </h3>
+              <span className="text-xs text-slate-400">
+                {benchHistory.length} lần chạy đã lưu (LocalStorage)
+              </span>
+            </div>
+
+            {benchHistory.length === 0 ? (
+              <div className="p-8 text-center rounded-2xl border border-slate-800 bg-slate-900/40 text-slate-400 text-sm">
+                Chưa có lượt chạy benchmark nào. Hãy chọn cấu hình phía trên và bấm &quot;CHẠY BENCHMARK TRỰC TIẾP&quot;!
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/60">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-900 border-b border-slate-800 text-slate-400 uppercase tracking-wider">
+                    <tr>
+                      <th className="p-3">Thời gian</th>
+                      <th className="p-3">Cấu hình (Vé / Req / VUs)</th>
+                      <th className="p-3">Thời gian chạy</th>
+                      <th className="p-3">Thông lượng (RPS)</th>
+                      <th className="p-3">Độ trễ p95</th>
+                      <th className="p-3">202 / 409</th>
+                      <th className="p-3">Lỗi Socket/Client</th>
+                      <th className="p-3">Bán âm</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 font-mono text-slate-300">
+                    {benchHistory.map((run, idx) => (
+                      <tr key={run.id} className="hover:bg-slate-800/40 transition-colors">
+                        <td className="p-3 text-slate-400 font-sans">
+                          <span className="font-bold text-white">#{benchHistory.length - idx}</span>{' '}
+                          ({run.timestamp})
+                        </td>
+                        <td className="p-3">
+                          <span className="text-purple-400">{run.targetStock} vé</span> •{' '}
+                          <span className="text-amber-400">{run.totalRequests.toLocaleString()} req</span> •{' '}
+                          <span className="text-slate-400">{run.concurrency} VUs</span>
+                        </td>
+                        <td className="p-3">{run.durationMs}ms</td>
+                        <td className="p-3 font-bold text-emerald-400">
+                          {run.rps.toLocaleString()} req/s
+                        </td>
+                        <td className="p-3 text-indigo-400">{run.p95Latency}ms</td>
+                        <td className="p-3">
+                          <span className="text-emerald-400">{run.accepted202}</span> /{' '}
+                          <span className="text-amber-400">{run.soldOut409}</span>
+                        </td>
+                        <td className="p-3">
+                          {run.errors5xx > 0 ? (
+                            <span className="text-rose-400 font-bold bg-rose-950/60 border border-rose-800/50 px-2 py-0.5 rounded text-[11px]" title="Nghẽn socket trình duyệt hoặc lỗi kết nối">
+                              {run.errors5xx.toLocaleString()} lỗi
+                            </span>
+                          ) : (
+                            <span className="text-slate-500">0</span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <span className="inline-flex items-center gap-1 text-emerald-400 font-bold font-sans text-[11px] bg-emerald-950/60 border border-emerald-800/50 px-2 py-0.5 rounded-full">
+                            <CheckCircle className="w-3 h-3" />
+                            0.00%
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-        )}
+        </div>
+      )}
       </main>
 
       {/* RESERVATION SUCCESS MODAL & 10-MIN PAYMENT FLOW */}

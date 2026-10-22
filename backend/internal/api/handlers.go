@@ -2,28 +2,81 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"flashpass/backend/internal/database"
+	"flashpass/backend/internal/models"
 	"flashpass/backend/internal/rabbitmq"
 	"flashpass/backend/internal/redis"
+	"flashpass/backend/internal/repository"
+	"flashpass/backend/internal/resilience"
+	"flashpass/backend/internal/service"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 )
 
 type Handler struct {
-	db       *database.DB
-	redis    *redis.Client
-	producer *rabbitmq.Producer
+	bookingService   service.BookingService
+	orderService     service.OrderService
+	reconcileService service.ReconcileService
+	stockCache       redis.StockCache
+	sf               singleflight.Group
+	cb               *resilience.CircuitBreaker
 }
 
-func NewHandler(db *database.DB, redis *redis.Client, producer *rabbitmq.Producer) *Handler {
+type EventMetaData struct {
+	Title     string    `json:"title"`
+	Total     int       `json:"total_tickets"`
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+}
+
+func NewHandler(db *database.DB, redisClient redis.StockCache, producer rabbitmq.EventProducer) *Handler {
+	eventRepo := repository.NewEventRepository(db)
+	orderRepo := repository.NewOrderRepository(db)
+	refundRepo := repository.NewRefundRepository(db)
+
+	reconcileSvc := service.NewReconcileService(eventRepo, redisClient)
+	bookingSvc := service.NewBookingService(redisClient, eventRepo, producer, reconcileSvc)
+	orderSvc := service.NewOrderService(orderRepo, eventRepo, refundRepo, redisClient, producer)
+
 	return &Handler{
-		db:       db,
-		redis:    redis,
-		producer: producer,
+		bookingService:   bookingSvc,
+		orderService:     orderSvc,
+		reconcileService: reconcileSvc,
+		stockCache:       redisClient,
+		cb:               resilience.NewCircuitBreaker(3, 1500*time.Millisecond),
 	}
+}
+
+func NewHandlerWithServices(
+	bookingSvc service.BookingService,
+	orderSvc service.OrderService,
+	reconcileSvc service.ReconcileService,
+	stockCache redis.StockCache,
+) *Handler {
+	return &Handler{
+		bookingService:   bookingSvc,
+		orderService:     orderSvc,
+		reconcileService: reconcileSvc,
+		stockCache:       stockCache,
+		cb:               resilience.NewCircuitBreaker(3, 1500*time.Millisecond),
+	}
+}
+
+// HealthCheck provides liveness probe
+// GET /health
+func (h *Handler) HealthCheck(c *fiber.Ctx) error {
+	return c.Status(http.StatusOK).JSON(fiber.Map{
+		"status": "UP",
+		"time":   time.Now().Format(time.RFC3339),
+	})
 }
 
 // PrewarmEvent loads an event's available tickets from PostgreSQL into Redis stock cache
@@ -37,51 +90,36 @@ func (h *Handler) PrewarmEvent(c *fiber.Ctx) error {
 		})
 	}
 
-	ctx, cancel := context.WithTimeout(c.Context(), 3*time.Second)
-	defer cancel()
-
-	var availableTickets int
-	var title string
-	err = h.db.Pool.QueryRow(ctx, "SELECT title, available_tickets FROM events WHERE id = $1", eventUUID).
-		Scan(&title, &availableTickets)
+	title, stock, err := h.orderService.PrewarmEvent(c.Context(), eventUUID)
 	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "Event not found in database",
-		})
-	}
-
-	if err := h.redis.PrewarmStock(ctx, eventIDStr, availableTickets); err != nil {
+		if errors.Is(err, service.ErrEventNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Event not found in database",
+			})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to prewarm Redis cache",
 		})
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"event_id":  eventIDStr,
-		"title":     title,
-		"stock":     availableTickets,
-		"message":   "Event stock successfully prewarmed in Redis",
+		"event_id": eventIDStr,
+		"title":    title,
+		"stock":    stock,
+		"message":  "Event stock successfully prewarmed in Redis",
 	})
-}
-
-// BookTicketRequest represents the incoming JSON payload for ticket reservation
-type BookTicketRequest struct {
-	EventID        string `json:"event_id"`
-	UserID         string `json:"user_id"`
-	IdempotencyKey string `json:"idempotency_key"`
 }
 
 // BookTicket handles flash sale ticket reservations with atomic Lua script and RabbitMQ ingestion
 // POST /api/v1/tickets/book
 func (h *Handler) BookTicket(c *fiber.Ctx) error {
-	var req BookTicketRequest
+	var req service.BookTicketRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Invalid request body JSON",
 		})
 	}
 
-	// Mandatory validations
 	if req.EventID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "event_id is required",
@@ -103,73 +141,61 @@ func (h *Handler) BookTicket(c *fiber.Ctx) error {
 		})
 	}
 
-	ctx := c.Context()
+	allowed, remaining, err := h.stockCache.CheckRateLimit(c.Context(), req.UserID, 5, 2*time.Second)
 
-	// 1. Idempotency Check (returns cached token if duplicate within 30s)
-	cachedOrderID, exists, err := h.redis.CheckIdempotency(ctx, req.IdempotencyKey)
-	if err == nil && exists {
-		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-			"order_id":        cachedOrderID,
-			"event_id":        req.EventID,
-			"user_id":         req.UserID,
-			"status":          "PENDING_PAYMENT",
-			"message":         "Duplicate request: returning existing reservation",
+	if err == nil && !allowed {
+		c.Set("Retry-After", "2")
+		c.Set("X-RateLimit-Limit", "5")
+		c.Set("X-RateLimit-Remaining", "0")
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"error":       "Too many requests, rate lite exceeded",
+			"retry_after": 2,
 		})
 	}
+	c.Set("X-RateLimit-Limit", "5")
+	c.Set("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
 
-	// 2. Atomic Lua Script: Check stock & 1-ticket-per-user guard
-	result, err := h.redis.BookTicket(ctx, req.EventID, req.UserID, 1)
+	res, err := h.bookingService.BookTicket(c.Context(), req)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Internal ticketing engine failure",
-		})
-	}
-
-	switch result {
-	case redis.ResultAlreadyBooked:
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"error": "User already booked a ticket for this event",
-		})
-	case redis.ResultSoldOut:
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"error": "Sold out",
-		})
-	case redis.ResultSuccess:
-		orderID := uuid.New().String()
-		expiresAt := time.Now().Add(10 * time.Minute)
-
-		// Cache idempotency key for 30s
-		_ = h.redis.SetIdempotency(ctx, req.IdempotencyKey, orderID, 30*time.Second)
-
-		// Publish order.create event to RabbitMQ
-		orderEvent := map[string]interface{}{
-			"order_id":        orderID,
-			"event_id":        req.EventID,
-			"user_id":         req.UserID,
-			"idempotency_key": req.IdempotencyKey,
-			"expires_at":      expiresAt,
-		}
-
-		if err := h.producer.PublishOrderCreate(ctx, orderEvent); err != nil {
-			// Rollback Redis stock if broker dispatch fails
-			_ = h.redis.RollbackStock(ctx, req.EventID, req.UserID, 1)
+		switch {
+		case errors.Is(err, service.ErrUserAlreadyBooked):
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "User already booked a ticket for this event",
+			})
+		case errors.Is(err, service.ErrSoldOut):
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "Sold out",
+			})
+		case errors.Is(err, service.ErrQueueFailed):
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "Failed to queue order reservation",
 			})
+		default:
+			c.Set("Retry-After", "2")
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":       "Please retry again after 2 seconds",
+				"retry-after": 2,
+			})
 		}
+	}
 
+	if res.IsCached {
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
-			"order_id":   orderID,
-			"event_id":   req.EventID,
-			"user_id":    req.UserID,
-			"status":     "PENDING_PAYMENT",
-			"expires_at": expiresAt.Format(time.RFC3339),
-		})
-	default:
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Unknown reservation response",
+			"order_id": res.OrderID,
+			"event_id": res.EventID,
+			"user_id":  res.UserID,
+			"status":   res.Status,
+			"message":  res.Message,
 		})
 	}
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"order_id":   res.OrderID,
+		"event_id":   res.EventID,
+		"user_id":    res.UserID,
+		"status":     res.Status,
+		"expires_at": res.ExpiresAt,
+	})
 }
 
 // GetStock returns real-time inventory from Redis
@@ -182,7 +208,7 @@ func (h *Handler) GetStock(c *fiber.Ctx) error {
 		})
 	}
 
-	stock, err := h.redis.GetStock(c.Context(), eventID)
+	stock, err := h.stockCache.GetStock(c.Context(), eventID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to read stock from cache",
@@ -204,34 +230,63 @@ func (h *Handler) GetEvent(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid event UUID"})
 	}
 
-	var title string
-	var total, available int
-	var start, end time.Time
-	err = h.db.Pool.QueryRow(c.Context(), `
-		SELECT title, total_tickets, available_tickets, start_time, end_time
-		FROM events WHERE id = $1
-	`, eventUUID).Scan(&title, &total, &available, &start, &end)
-	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
-	}
+	ctx := context.Background()
+	metaKey := redis.EventMetaKey(eventIDStr)
 
-	// Read live stock from Redis if populated
-	liveStock, err := h.redis.GetStock(c.Context(), eventIDStr)
+	var meta EventMetaData
+	cachedJSON, err := h.stockCache.RDB().Get(ctx, metaKey).Result()
 	if err == nil {
-		available = liveStock
+		if err := json.Unmarshal([]byte(cachedJSON), &meta); err == nil {
+			liveStock, _ := h.stockCache.GetStock(ctx, eventIDStr)
+			return c.Status(fiber.StatusOK).JSON(fiber.Map{
+				"id":                eventIDStr,
+				"title":             meta.Title,
+				"total_tickets":     meta.Total,
+				"available_tickets": liveStock,
+				"start_time":        meta.StartTime.Format(time.RFC3339),
+				"end_time":          meta.EndTime.Format(time.RFC3339),
+			})
+		}
 	}
 
+	val, err, _ := h.sf.Do(eventIDStr, func() (interface{}, error) {
+		details, err := h.orderService.GetEventDetails(ctx, eventUUID)
+		if err != nil {
+			return nil, err
+		}
+		m := EventMetaData{
+			Title:     details.Title,
+			Total:     details.TotalTickets,
+			StartTime: details.StartTime,
+			EndTime:   details.EndTime,
+		}
+
+		if data, err := json.Marshal(m); err == nil {
+			_ = h.stockCache.RDB().Set(context.Background(), metaKey, string(data), 5*time.Minute).Err()
+		}
+		return details, nil
+	})
+
+	if err != nil {
+		if errors.Is(err, service.ErrEventNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	details := val.(*service.EventDetails)
+	liveStock, _ := h.stockCache.GetStock(ctx, eventIDStr)
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"id":                eventIDStr,
-		"title":             title,
-		"total_tickets":     total,
-		"available_tickets": available,
-		"start_time":        start.Format(time.RFC3339),
-		"end_time":          end.Format(time.RFC3339),
+		"id":                details.ID,
+		"title":             details.Title,
+		"total_tickets":     details.TotalTickets,
+		"available_tickets": liveStock,
+		"start_time":        details.StartTime.Format(time.RFC3339),
+		"end_time":          details.EndTime.Format(time.RFC3339),
 	})
 }
 
-// GetAdminMetrics returns live stats (Redis stock vs PostgreSQL orders)
+// GetAdminMetrics returns live stats (Redis stock vs PostgreSQL orders) protected by Circuit Breaker
 // GET /api/v1/admin/events/:id/metrics
 func (h *Handler) GetAdminMetrics(c *fiber.Ctx) error {
 	eventIDStr := c.Params("id")
@@ -240,39 +295,43 @@ func (h *Handler) GetAdminMetrics(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid event UUID"})
 	}
 
-	ctx := c.Context()
-	stock, _ := h.redis.GetStock(ctx, eventIDStr)
-
-	var pending, paid, expired, totalOrders int
-	rows, err := h.db.Pool.Query(ctx, `
-		SELECT status, count(*) FROM orders WHERE event_id = $1 GROUP BY status
-	`, eventUUID)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var st string
-			var cnt int
-			if err := rows.Scan(&st, &cnt); err == nil {
-				totalOrders += cnt
-				switch st {
-				case "PENDING_PAYMENT":
-					pending = cnt
-				case "PAID":
-					paid = cnt
-				case "EXPIRED":
-					expired = cnt
-				}
-			}
+	var metrics *service.EventMetrics
+	cbErr := h.cb.Execute(func() error {
+		if c.Query("chaos") == "db_error" {
+			return errors.New("simulated database connection error (connection pool exhausted)")
 		}
+		var qErr error
+		metrics, qErr = h.orderService.GetEventMetrics(c.Context(), eventUUID)
+		return qErr
+	})
+
+	if cbErr != nil {
+		if errors.Is(cbErr, resilience.ErrCircuitOpen) {
+			// Circuit is OPEN -> Fast-Fail immediately in 0ms with HTTP 503
+			c.Set("Retry-After", "2")
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error":       "Database circuit breaker is OPEN: service degraded",
+				"retry_after": 2,
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch metrics"})
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"event_id":       eventIDStr,
-		"stock":          stock,
-		"pending_orders": pending,
-		"paid_orders":    paid,
-		"expired_orders": expired,
-		"total_orders":   totalOrders,
+		"event_id":       metrics.EventID,
+		"stock":          metrics.Stock,
+		"pending_orders": metrics.PendingOrders,
+		"paid_orders":    metrics.PaidOrders,
+		"expired_orders": metrics.ExpiredOrders,
+		"total_orders":   metrics.TotalOrders,
+	})
+}
+
+// GetCircuitBreakerStatus returns current circuit breaker state
+// GET /api/v1/admin/circuit-breaker
+func (h *Handler) GetCircuitBreakerStatus(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"state": h.cb.State(),
 	})
 }
 
@@ -285,31 +344,21 @@ func (h *Handler) ResetEvent(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid event UUID"})
 	}
 
-	ctx := c.Context()
-
-	var totalTickets int
-	err = h.db.Pool.QueryRow(ctx, "SELECT total_tickets FROM events WHERE id = $1", eventUUID).Scan(&totalTickets)
-	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
-	}
-
 	var req struct {
 		Tickets int `json:"tickets"`
 	}
 	_ = c.BodyParser(&req)
-	if req.Tickets > 0 {
-		totalTickets = req.Tickets
-	} else if q := c.QueryInt("tickets", 0); q > 0 {
-		totalTickets = q
+	customTickets := req.Tickets
+	if customTickets <= 0 {
+		customTickets = c.QueryInt("tickets", 0)
 	}
-	_, _ = h.db.Pool.Exec(ctx, "UPDATE events SET total_tickets = $1, available_tickets = $1 WHERE id = $2", totalTickets, eventUUID)
 
-	// 1. Delete orders in DB
-	_, _ = h.db.Pool.Exec(ctx, "DELETE FROM orders WHERE event_id = $1", eventUUID)
-
-	// 2. Reset Redis stock & clear booked user tags
-	if err := h.redis.ResetEvent(ctx, eventIDStr, totalTickets); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to reset Redis stock"})
+	totalTickets, err := h.orderService.ResetEvent(c.Context(), eventUUID, customTickets)
+	if err != nil {
+		if errors.Is(err, service.ErrEventNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
@@ -330,61 +379,126 @@ func (h *Handler) PayOrder(c *fiber.Ctx) error {
 		})
 	}
 
-	ctx := c.Context()
-
-	var status string
-	var expiresAt time.Time
-	err = h.db.Pool.QueryRow(ctx, "SELECT status, expires_at FROM orders WHERE id = $1", orderUUID).
-		Scan(&status, &expiresAt)
+	res, err := h.orderService.PayOrder(c.Context(), orderUUID)
+	fmt.Print(res, err)
 	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "Order not found",
-		})
-	}
-
-	if status == "PAID" {
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"order_id": orderIDStr,
-			"status":   "PAID",
-			"message":  "Order already paid",
-		})
-	}
-
-	if status == "EXPIRED" || time.Now().After(expiresAt) {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Order has expired and tickets were released",
-		})
-	}
-
-	if status != "PENDING_PAYMENT" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Order cannot be paid in current status: " + status,
-		})
-	}
-
-	// Update to PAID
-	res, err := h.db.Pool.Exec(ctx, `
-		UPDATE orders SET status = 'PAID', updated_at = NOW()
-		WHERE id = $1 AND status = 'PENDING_PAYMENT'
-	`, orderUUID)
-	if err != nil || res.RowsAffected() == 0 {
+		if errors.Is(err, service.ErrOrderNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Order not found",
+			})
+		}
+		if errors.Is(err, service.ErrInvalidOrderStatus) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": err.Error(),
+			})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to update order payment status",
+			"error": err.Error(),
+		})
+	}
+
+	if res.Status == models.OrderStatusRefundPending {
+		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+			"order_id": res.OrderID,
+			"status":   res.Status,
+			"message":  res.Message,
 		})
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"order_id": orderIDStr,
-		"status":   "PAID",
-		"message":  "Payment successful",
+		"order_id": res.OrderID,
+		"status":   res.Status,
+		"message":  res.Message,
 	})
 }
 
-// HealthCheck provides liveness probe
-// GET /health
-func (h *Handler) HealthCheck(c *fiber.Ctx) error {
-	return c.Status(http.StatusOK).JSON(fiber.Map{
-		"status": "UP",
-		"time":   time.Now().Format(time.RFC3339),
+// ReconcileEvent audits and self-heals Ghost Inventory disparity between PostgreSQL and Redis
+// POST /api/v1/admin/events/:id/reconcile
+func (h *Handler) ReconcileEvent(c *fiber.Ctx) error {
+	eventIDStr := c.Params("id")
+	eventUUID, err := uuid.Parse(eventIDStr)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid event UUID"})
+	}
+
+	res, err := h.reconcileService.ReconcileEvent(c.Context(), eventUUID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"event_id":       res.EventID,
+		"total_tickets":  res.TotalTickets,
+		"active_orders":  res.ActiveOrders,
+		"expected_stock": res.ExpectedStock,
+		"actual_stock":   res.ActualStock,
+		"discrepancy":    res.Discrepancy,
+		"healed":         res.Healed,
+		"message":        "Stock reconciliation complete",
+	})
+}
+
+// UnlockUser clears orphaned user booking lock if the user has no active orders
+// POST /api/v1/admin/events/:id/users/:userId/unlock
+func (h *Handler) UnlockUser(c *fiber.Ctx) error {
+	eventIDStr := c.Params("id")
+	userID := c.Params("userId")
+	if eventIDStr == "" || userID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "event id and user id are required"})
+	}
+
+	err := h.orderService.UnlockUser(c.Context(), eventIDStr, userID)
+	if err != nil {
+		if errors.Is(err, service.ErrUserHasActiveOrder) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "User already has an active or paid order, cannot unlock",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"event_id": eventIDStr,
+		"user_id":  userID,
+		"unlocked": true,
+		"message":  "Orphaned user booking lock cleared successfully",
+	})
+}
+
+// PerformReconciliation provides a backward-compatible adapter method
+func (h *Handler) PerformReconciliation(ctx context.Context, eventUUID uuid.UUID) (totalTickets, activeOrders, expectedStock, actualStock, discrepancy int, healed bool, err error) {
+	res, err := h.reconcileService.ReconcileEvent(ctx, eventUUID)
+	if err != nil {
+		if res != nil {
+			return res.TotalTickets, res.ActiveOrders, res.ExpectedStock, 0, 0, false, err
+		}
+		return 0, 0, 0, 0, 0, false, err
+	}
+	return res.TotalTickets, res.ActiveOrders, res.ExpectedStock, res.ActualStock, res.Discrepancy, res.Healed, nil
+}
+
+type CancelOrderRequest struct {
+	EventID string `json:"event_id"`
+	UserID  string `json:"user_id"`
+}
+
+// CancelOrder handles user reservation cancellation
+// POST /api/v1/orders/:id/cancel
+func (h *Handler) CancelOrder(c *fiber.Ctx) error {
+	orderIDStr := c.Params("id")
+	orderUUID, err := uuid.Parse(orderIDStr)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid order UUID"})
+	}
+	var req CancelOrderRequest
+	_ = c.BodyParser(&req)
+	eventUUID, _ := uuid.Parse(req.EventID)
+	if err := h.orderService.CancelOrder(c.Context(), orderUUID, eventUUID, req.UserID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"order_id": orderIDStr,
+		"status":   models.OrderStatusCancelled,
+		"message":  "Order successfully cancelled and ticket released",
 	})
 }

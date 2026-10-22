@@ -8,21 +8,38 @@ import (
 	"sync"
 	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go"
 	"flashpass/backend/internal/config"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 const (
-	OrderExchange     = "flashpass.order.exchange"
-	OrderCreateQueue  = "flashpass.order.create.queue"
-	OrderCreateKey    = "order.create"
+	OrderExchange    = "flashpass.order.exchange"
+	OrderCreateQueue = "flashpass.order.create.queue"
+	OrderCreateKey   = "order.create"
+
+	OrderRefundQueue = "flashpass.order.refund.queue"
+	OrderRefundKey   = "order.refund"
 
 	DelayedExchange   = "flashpass.order.delayed.exchange"
 	OrderTimeoutQueue = "flashpass.order.timeout.queue"
 	OrderTimeoutKey   = "order.timeout"
+
+	OrderDLExchange = "flashpass.order.dlx"
+	OrderDLQueue    = "flashpass.order.dlq"
+	OrderDLKey      = "order.dlq"
 )
 
 type Delivery = amqp.Delivery
+
+// EventProducer abstracts message publishing for dependency injection and mocking
+type EventProducer interface {
+	PublishOrderCreate(ctx context.Context, payload interface{}) error
+	PublishDelayedOrderTimeout(ctx context.Context, payload interface{}, delayMs int64) error
+	PublishOrderRefund(ctx context.Context, payload interface{}) error
+	GetQueueDepth(queueName string) (int, error)
+	Channel() (*amqp.Channel, error)
+	Close()
+}
 
 type Producer struct {
 	mu   sync.Mutex
@@ -30,6 +47,9 @@ type Producer struct {
 	ch   *amqp.Channel
 	url  string
 }
+
+// Compile-time check that Producer implements EventProducer
+var _ EventProducer = (*Producer)(nil)
 
 func NewProducer(cfg *config.Config) (*Producer, error) {
 	p := &Producer{url: cfg.RabbitMQURL}
@@ -58,7 +78,10 @@ func (p *Producer) Connection() *amqp.Connection {
 func (p *Producer) connect() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.connectLocked()
+}
 
+func (p *Producer) connectLocked() error {
 	conn, err := amqp.Dial(p.url)
 	if err != nil {
 		return fmt.Errorf("failed to dial rabbitmq: %w", err)
@@ -86,13 +109,54 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("failed to declare exchange: %w", err)
 	}
 
+	err = ch.ExchangeDeclare(
+		OrderDLExchange,
+		"direct",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to declare dlx exchange: %w", err)
+	}
+
+	qDLQ, err := ch.QueueDeclare(
+		OrderDLQueue,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to declare dlq queue: %w", err)
+	}
+
+	err = ch.QueueBind(qDLQ.Name, OrderDLKey, OrderDLExchange, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to bind dlq: %w", err)
+	}
+
+	qCreateArgs := amqp.Table{
+		"x-dead-letter-exchange":    OrderDLExchange,
+		"x-dead-letter-routing-key": OrderDLKey,
+	}
+
 	qCreate, err := ch.QueueDeclare(
 		OrderCreateQueue,
 		true,
 		false,
 		false,
 		false,
-		nil,
+		qCreateArgs,
 	)
 	if err != nil {
 		_ = ch.Close()
@@ -105,6 +169,27 @@ func (p *Producer) connect() error {
 		_ = ch.Close()
 		_ = conn.Close()
 		return fmt.Errorf("failed to bind queue: %w", err)
+	}
+
+	qRefund, err := ch.QueueDeclare(
+		OrderRefundQueue,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to declare refund queue: %w", err)
+	}
+
+	err = ch.QueueBind(qRefund.Name, OrderRefundKey, OrderExchange, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return fmt.Errorf("failed to bind refund queue: %w", err)
 	}
 
 	err = ch.ExchangeDeclare(
@@ -156,20 +241,29 @@ func (p *Producer) PublishDelayedOrderTimeout(ctx context.Context, payload inter
 	return p.publish(ctx, DelayedExchange, OrderTimeoutKey, payload, delayMs)
 }
 
-func (p *Producer) publish(ctx context.Context, exchange, key string, payload interface{}, delayMs int64) error {
-	p.mu.Lock()
-	ch := p.ch
-	p.mu.Unlock()
+func (p *Producer) PublishOrderRefund(ctx context.Context, payload interface{}) error {
+	return p.publish(ctx, OrderExchange, OrderRefundKey, payload, 0)
+}
 
-	if ch == nil || ch.IsClosed() {
-		if err := p.connect(); err != nil {
-			return fmt.Errorf("rabbitmq reconnect failed: %w", err)
-		}
-		p.mu.Lock()
-		ch = p.ch
-		p.mu.Unlock()
+// GetQueueDepth inspects the specified queue and returns the count of ready messages
+func (p *Producer) GetQueueDepth(queueName string) (int, error) {
+	ch, err := p.Channel()
+	if err != nil {
+		return 0, err
 	}
+	defer ch.Close()
 
+	q, err := ch.QueueInspect(queueName)
+	if err != nil {
+		return 0, err
+	}
+	return q.Messages, nil
+}
+
+// publish marshals the payload and executes a thread-safe publish on the channel.
+// Locking ensures that concurrent goroutines never invoke PublishWithContext simultaneously
+// on the same amqp091 Channel.
+func (p *Producer) publish(ctx context.Context, exchange, key string, payload interface{}, delayMs int64) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal event: %w", err)
@@ -180,19 +274,30 @@ func (p *Producer) publish(ctx context.Context, exchange, key string, payload in
 		headers["x-delay"] = delayMs
 	}
 
-	return ch.PublishWithContext(
+	publishing := amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		Timestamp:    time.Now(),
+		Headers:      headers,
+		Body:         body,
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.ch == nil || p.ch.IsClosed() {
+		if err := p.connectLocked(); err != nil {
+			return fmt.Errorf("rabbitmq reconnect failed: %w", err)
+		}
+	}
+
+	return p.ch.PublishWithContext(
 		ctx,
 		exchange,
 		key,
 		false, // mandatory
 		false, // immediate
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			Timestamp:    time.Now(),
-			Headers:      headers,
-			Body:         body,
-		},
+		publishing,
 	)
 }
 

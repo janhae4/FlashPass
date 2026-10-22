@@ -50,5 +50,6 @@ func main() {
 
 	log.Println("[Worker] Shutting down FlashPass Background Worker...")
 	cancel()
+	svc.Stop()
 	log.Println("[Worker] Exited cleanly.")
 }

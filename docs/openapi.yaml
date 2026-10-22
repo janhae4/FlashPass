@@ -1,0 +1,583 @@
+openapi: 3.1.0
+info:
+  title: FlashPass High-Concurrency Flash Sale & Ticketing API
+  version: 1.0.0
+  description: |
+    Production-grade, distributed flash-sale booking engine designed for 20,000+ RPS.
+    Guarantees strictly 0.00% overselling through atomic Redis Lua scripts, asynchronous RabbitMQ ingestion,
+    and self-healing Stock Auditor reconciliation.
+  contact:
+    name: FlashPass Core Systems Team
+    email: engineering@flashpass.io
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local Docker Development Server
+  - url: https://api.flashpass.io
+    description: Production High-Availability Cluster
+
+paths:
+  /health:
+    get:
+      summary: Liveness & Readiness Health Check
+      description: Returns health status of API server for Kubernetes container probes.
+      operationId: getHealth
+      tags:
+        - Health & Diagnostics
+      responses:
+        '200':
+          description: Service is healthy and operational
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2026-10-22T14:00:00Z"
+
+  /api/v1/events/{id}:
+    get:
+      summary: Get Event Metadata (SingleFlight Protected)
+      description: Returns event details, date boundaries, and inventory capacity with SingleFlight coalescing.
+      operationId: getEvent
+      tags:
+        - Events
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Unique Event UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Event found and returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/events/{id}/stock:
+    get:
+      summary: Get Live In-Memory Stock
+      description: Returns available stock directly from Redis RAM in < 1ms.
+      operationId: getEventStock
+      tags:
+        - Events
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Real-time inventory count returned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event_id:
+                    type: string
+                    format: uuid
+                  stock:
+                    type: integer
+                    example: 420
+
+  /api/v1/events/{id}/stream:
+    get:
+      summary: Real-Time Stock Event Stream (SSE)
+      description: Persistent Server-Sent Events stream emitting real-time inventory updates.
+      operationId: streamEventStock
+      tags:
+        - Events
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Streaming SSE connection established
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: "event: stock_update\ndata: {\"event_id\":\"7f000001-92be-1fa2-8192-be2069cb0000\",\"stock\":419}\n\n"
+
+  /api/v1/tickets/book:
+    post:
+      summary: Primary High-Concurrency Ticket Booking Ingestion
+      description: |
+        Executes atomic check-and-decrement in Redis via Lua script.
+        Enqueues order persistence to RabbitMQ upon success.
+      operationId: bookTicket
+      tags:
+        - Bookings
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Client-generated UUIDv4 preventing duplicate reservation submissions.
+          schema:
+            type: string
+            format: uuid
+        - name: traceparent
+          in: header
+          required: false
+          description: W3C Distributed TraceContext header.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookTicketRequest'
+      responses:
+        '202':
+          description: Reservation accepted in RAM and enqueued for database persistence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookTicketResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Fail-fast conflict (Sold out or user already reserved a ticket).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Sliding-window rate limit exceeded.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                example: 2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Database circuit breaker tripped (OPEN).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/orders/{id}:
+    get:
+      summary: Get Order Details
+      description: Returns order state, payment expiration timestamp, and associated ticket.
+      operationId: getOrder
+      tags:
+        - Orders
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Order details returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orders/{id}/pay:
+    post:
+      summary: Payment Confirmation Webhook (Protected by Watchdog Lock & HMAC)
+      description: |
+        Called by payment gateways or checkout forms to transition order status to PAID.
+        Protected by Distributed Lock Watchdog and HMAC-SHA256 signature verification.
+        If order expired, automatically redirects to REFUND_PENDING and queues refund.
+      operationId: payOrder
+      tags:
+        - Orders
+      security:
+        - WebhookHMAC: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Signature
+          in: header
+          required: true
+          description: Format "t={timestamp_ms},v1={hmac_sha256_hex}"
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                gateway_transaction_id:
+                  type: string
+                amount:
+                  type: number
+      responses:
+        '200':
+          description: Payment confirmed or auto-refund initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayOrderResponse'
+        '401':
+          description: Invalid cryptographic HMAC signature or replay timestamp
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orders/{id}/cancel:
+    post:
+      summary: Voluntarily Cancel Order
+      description: Cancels reservation and immediately releases ticket back to Redis pool.
+      operationId: cancelOrder
+      tags:
+        - Orders
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Order cancelled and stock released
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    example: "CANCELLED"
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/events/{id}/prewarm:
+    post:
+      summary: Pre-warm Event Stock into Redis RAM
+      description: Loads available stock from PostgreSQL into Redis before sale begins.
+      operationId: prewarmEvent
+      tags:
+        - Administration
+      security:
+        - AdminSecret: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Prewarm successful
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/admin/events/{id}/reconcile:
+    post:
+      summary: Self-Healing Stock Reconciliation (Stock Auditor)
+      description: |
+        Reconciles Redis Stock vs PostgreSQL Orders (PAID + PENDING).
+        Heals ghost inventory discrepancies automatically without downtime.
+      operationId: reconcileEventStock
+      tags:
+        - Administration
+      security:
+        - AdminSecret: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reconciliation audit completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReconcileResponse'
+
+  /api/v1/admin/events/{id}/reset:
+    post:
+      summary: Dynamic Reset / Restock Event
+      description: Resets orders and inventory for interactive testing demonstrations.
+      operationId: resetEvent
+      tags:
+        - Administration
+      security:
+        - AdminSecret: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tickets:
+                  type: integer
+                  example: 1000
+      responses:
+        '200':
+          description: Event successfully reset
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Authenticated user JWT token containing sub claim.
+    AdminSecret:
+      type: http
+      scheme: bearer
+      description: Master administrative Bearer token.
+    WebhookHMAC:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: HMAC-SHA256 signature generated over canonical payload timestamp.raw_body.
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Authentication required or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    Event:
+      type: object
+      required:
+        - id
+        - title
+        - total_tickets
+        - available_tickets
+        - start_time
+        - end_time
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        total_tickets:
+          type: integer
+        available_tickets:
+          type: integer
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    Order:
+      type: object
+      required:
+        - id
+        - event_id
+        - user_id
+        - status
+        - expires_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+        idempotency_key:
+          type: string
+        status:
+          type: string
+          enum: [PENDING_PAYMENT, PAID, EXPIRED, REFUND_PENDING, REFUNDED, CANCELLED]
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RefundOrder:
+      type: object
+      required:
+        - id
+        - order_id
+        - user_id
+        - amount
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+        amount:
+          type: integer
+          description: Amount in cents / minor currency unit
+        reason:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, SUCCESS, FAILED]
+        retry_count:
+          type: integer
+        max_retries:
+          type: integer
+        next_retry_at:
+          type: string
+          format: date-time
+        idempotency_key:
+          type: string
+
+    BookTicketRequest:
+      type: object
+      required:
+        - event_id
+        - user_id
+        - idempotency_key
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          example: "7f000001-92be-1fa2-8192-be2069cb0000"
+        user_id:
+          type: string
+          example: "user-884920"
+        idempotency_key:
+          type: string
+          format: uuid
+          example: "c71e2efc-7729-4a92-9382-7b0e41cf77d0"
+
+    BookTicketResponse:
+      type: object
+      required:
+        - order_id
+        - status
+        - expires_in
+      properties:
+        order_id:
+          type: string
+          format: uuid
+          example: "0192be23-5e92-70b1-9f22-48a04bce9431"
+        status:
+          type: string
+          example: "PENDING_PAYMENT"
+        expires_in:
+          type: integer
+          example: 600
+        message:
+          type: string
+
+    PayOrderResponse:
+      type: object
+      required:
+        - order_id
+        - status
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PAID, REFUND_PENDING]
+        message:
+          type: string
+
+    ReconcileResponse:
+      type: object
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        initial_tickets:
+          type: integer
+        active_orders:
+          type: integer
+        expected_stock:
+          type: integer
+        actual_stock:
+          type: integer
+        discrepancy:
+          type: integer
+        healed:
+          type: boolean
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        retry_after:
+          type: integer

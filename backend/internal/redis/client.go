@@ -5,74 +5,99 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"flashpass/backend/internal/config"
+
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
+
+// StockCache abstracts Redis inventory and idempotency operations
+type StockCache interface {
+	BookTicket(ctx context.Context, eventID, userID string, quantity int) (int64, error)
+	RollbackStock(ctx context.Context, eventID, userID string, quantity int) error
+	ClearUserBooked(ctx context.Context, eventID, userID string) error
+	PrewarmStock(ctx context.Context, eventID string, stock int) error
+	GetStock(ctx context.Context, eventID string) (int, error)
+	CheckIdempotency(ctx context.Context, idempotencyKey string) (string, bool, error)
+	SetIdempotency(ctx context.Context, idempotencyKey string, orderID string, ttl time.Duration) error
+	IsUserBooked(ctx context.Context, eventID, userID string) (bool, error)
+	ResetEvent(ctx context.Context, eventID string, stock int) error
+	IsMasterAlive(ctx context.Context) bool
+	AcquireLock(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	ReleaseLock(ctx context.Context, key string) error
+	AcquireLockWithWatchdog(ctx context.Context, key string, ttl time.Duration) (*WatchdogLock, bool, error)
+	CheckRateLimit(ctx context.Context, identifier string, limit int, window time.Duration) (bool, int, error)
+	Ping(ctx context.Context) error
+	Close() error
+	RDB() *redis.Client
+}
 
 type Client struct {
 	rdb *redis.Client
+	cfg *config.Config
 }
 
-// New creates a new Redis client with explicit connection pooling and preloaded Lua scripts
+var _ StockCache = (*Client)(nil)
+
 func New(ctx context.Context, cfg *config.Config) (*Client, error) {
-	var opts *redis.Options
+	sentinelAddr := fmt.Sprintf("%s:%s", cfg.RedisSentinelHost, cfg.RedisSentinelPort)
+	masterHostPort := fmt.Sprintf("%s:%s", cfg.RedisHost, cfg.RedisPort)
+	replicaHostPort := fmt.Sprintf("%s:%s", cfg.RedisHost, cfg.RedisReplicaPort)
 
-	if cfg.RedisURL != "" {
-		parsedOpts, err := redis.ParseURL(cfg.RedisURL)
-		if err == nil {
-			opts = parsedOpts
-		}
+	opts := &redis.FailoverOptions{
+		MasterName: "mymaster",
+		SentinelAddrs: []string{
+			sentinelAddr,
+		},
+		Password:     cfg.RedisPassword,
+		DB:           0,
+		PoolSize:     cfg.RedisPoolSize,
+		MinIdleConns: cfg.RedisMinIdleConns,
+		DialTimeout:  cfg.RedisDialTimeout,
+		ReadTimeout:  cfg.RedisReadTimeout,
+		WriteTimeout: cfg.RedisWriteTimeout,
+		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if strings.HasPrefix(addr, "redis:") {
+				addr = masterHostPort
+			} else if strings.HasPrefix(addr, "redis_replica:") {
+				addr = replicaHostPort
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		},
+		RouteRandomly: false,
 	}
+	rdb := redis.NewFailoverClient(opts)
 
-	if opts == nil {
-		opts = &redis.Options{
-			Addr:     fmt.Sprintf("%s:%s", cfg.RedisHost, cfg.RedisPort),
-			Password: cfg.RedisPassword,
-			DB:       0,
-		}
-	}
-
-	// Explicit connection pool settings for high throughput (20k+ RPS)
-	opts.PoolSize = cfg.RedisPoolSize
-	opts.MinIdleConns = cfg.RedisMinIdleConns
-	opts.DialTimeout = cfg.RedisDialTimeout
-	opts.ReadTimeout = cfg.RedisReadTimeout
-	opts.WriteTimeout = cfg.RedisWriteTimeout
-
-	rdb := redis.NewClient(opts)
-
-	// Verify connection
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	if err := rdb.Ping(pingCtx).Err(); err != nil {
 		_ = rdb.Close()
-		return nil, fmt.Errorf("failed to ping redis: %w", err)
+		return nil, fmt.Errorf("failed to ping redis master: %w", err)
 	}
 
-	// Pre-load Lua scripts to cache SHA1 hashes in Redis memory
 	if err := bookTicketScript.Load(ctx, rdb).Err(); err != nil {
-		log.Printf("[Redis WARNING] Failed to preload bookTicketScript: %v", err)
+		log.Printf("[Redis WARNING] Failed to preload bookTicketScript on master: %v", err)
 	}
 	if err := rollbackStockScript.Load(ctx, rdb).Err(); err != nil {
-		log.Printf("[Redis WARNING] Failed to preload rollbackStockScript: %v", err)
+		log.Printf("[Redis WARNING] Failed to preload rollbackStockScript on master: %v", err)
 	}
 
-	log.Printf("[Redis] Connected successfully to Redis (pool_size=%d, min_idle=%d)",
-		opts.PoolSize, opts.MinIdleConns)
+	log.Printf("[Redis] Connected successfully to Master (:6379) and Replica (:6380)")
 
-	return &Client{rdb: rdb}, nil
+	return &Client{rdb: rdb, cfg: cfg}, nil
 }
 
-// RDB returns the underlying go-redis client
 func (c *Client) RDB() *redis.Client {
 	return c.rdb
 }
 
-// Ping checks if Redis is responsive
 func (c *Client) Ping(ctx context.Context) error {
 	return c.rdb.Ping(ctx).Err()
 }
@@ -88,9 +113,10 @@ func (c *Client) Close() error {
 
 // BookTicket executes the atomic inventory decrement script
 // Returns:
-//   1: Success
-//  -1: Sold out
-//  -2: User already booked
+//
+//	 1: Success
+//	-1: Sold out
+//	-2: User already booked
 func (c *Client) BookTicket(ctx context.Context, eventID, userID string, quantity int) (int64, error) {
 	stockKey := StockKey(eventID)
 	userKey := UserBookedKey(eventID, userID)
@@ -120,6 +146,12 @@ func (c *Client) RollbackStock(ctx context.Context, eventID, userID string, quan
 	}
 
 	return nil
+}
+
+// ClearUserBooked removes the user's booking lock key in Redis
+func (c *Client) ClearUserBooked(ctx context.Context, eventID, userID string) error {
+	key := UserBookedKey(eventID, userID)
+	return c.rdb.Del(ctx, key).Err()
 }
 
 // PrewarmStock loads event stock into Redis
@@ -193,7 +225,7 @@ func (c *Client) ResetEvent(ctx context.Context, eventID string, stock int) erro
 	}
 
 	// Delete user booked keys matching pattern
-	pattern := fmt.Sprintf("%s%s:*", PrefixUserBooked, eventID)
+	pattern := UserBookedPattern(eventID)
 	iter := c.rdb.Scan(ctx, 0, pattern, 0).Iterator()
 	var keysToDelete []string
 	for iter.Next(ctx) {
@@ -210,4 +242,110 @@ func (c *Client) ResetEvent(ctx context.Context, eventID string, stock int) erro
 	}
 
 	return nil
+}
+
+// IsMasterAlive checks if Redis master responds to PING within 500ms
+func (c *Client) IsMasterAlive(ctx context.Context) bool {
+	pingCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	return c.rdb.Ping(pingCtx).Err() == nil
+}
+
+// AcquireLock attempts to acquire a distributed lock with TTL
+func (c *Client) AcquireLock(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	return c.rdb.SetNX(ctx, key, "1", ttl).Result()
+}
+
+func (c *Client) ReleaseLock(ctx context.Context, key string) error {
+	return c.rdb.Del(ctx, key).Err()
+}
+
+func (c *Client) CheckRateLimit(ctx context.Context, identifier string, limit int, window time.Duration) (bool, int, error) {
+	key := RateLimitKey(identifier)
+	now := time.Now().UnixMilli()
+	windowMs := window.Milliseconds()
+	member := fmt.Sprintf("%d:%s", now, uuid.New().String())
+	ttlSeconds := int(window.Seconds()) + 1
+	ttlSeconds = max(ttlSeconds, 1)
+	res, err := slidingWindowRateLimitScript.Run(ctx, c.rdb, []string{key}, now, windowMs, limit, member, ttlSeconds).Slice()
+	if err != nil {
+		return false, 0, fmt.Errorf("Rate limit!")
+	}
+	if len(res) < 2 {
+		return false, 0, fmt.Errorf("Unexpected Rate limit return")
+	}
+
+	allowed, _ := res[0].(int64)
+	remaining, _ := res[1].(int64)
+	return allowed == 1, int(remaining), nil
+}
+
+type WatchdogLock struct {
+	Key    string
+	Owner  string
+	TTL    time.Duration
+	cancel context.CancelFunc
+	done   chan struct{}
+	client *Client
+}
+
+// Unlock stops the watchdog heartbeat and releases the lock safely with owner verification
+func (l *WatchdogLock) Unlock(ctx context.Context) error {
+	if l.cancel != nil {
+		l.cancel()
+	}
+	if l.done != nil {
+		<-l.done
+	}
+	return l.client.releaseLockWithOwner(ctx, l.Key, l.Owner)
+}
+
+func (c *Client) releaseLockWithOwner(ctx context.Context, key, owner string) error {
+	return releaseLockWithOwnerScript.Run(ctx, c.rdb, []string{key}, owner).Err()
+}
+
+// AcquireLockWithWatchdog acquires a distributed lock and spawns a background goroutine to auto-renew TTL
+func (c *Client) AcquireLockWithWatchdog(ctx context.Context, key string, ttl time.Duration) (*WatchdogLock, bool, error) {
+	owner := uuid.New().String()
+	ttlSeconds := int(ttl.Seconds())
+	if ttlSeconds < 1 {
+		ttlSeconds = 1
+	}
+
+	ok, err := c.rdb.SetNX(ctx, key, owner, ttl).Result()
+	if err != nil || !ok {
+		return nil, false, err
+	}
+
+	watchdogCtx, cancel := context.WithCancel(context.Background())
+	lock := &WatchdogLock{
+		Key:    key,
+		Owner:  owner,
+		TTL:    ttl,
+		cancel: cancel,
+		done:   make(chan struct{}),
+		client: c,
+	}
+
+	renewInterval := ttl / 3
+	if renewInterval < 100*time.Millisecond {
+		renewInterval = 100 * time.Millisecond
+	}
+
+	go func() {
+		defer close(lock.done)
+		ticker := time.NewTicker(renewInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-watchdogCtx.Done():
+				return
+			case <-ticker.C:
+				_ = renewLockScript.Run(watchdogCtx, c.rdb, []string{key}, owner, ttlSeconds).Err()
+			}
+		}
+	}()
+
+	return lock, true, nil
 }

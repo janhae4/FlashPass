@@ -77,8 +77,12 @@ func TestRedisClientAndLuaScripts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BookTicket user %d failed: %v", i, err)
 		}
-		if r != ResultSuccess {
-			t.Errorf("Expected ResultSuccess (1) for user %d, got %d", i, r)
+		expected := ResultSuccess
+		if i == 5 {
+			expected = ResultSuccessHitZero
+		}
+		if r != expected {
+			t.Errorf("Expected %d for user %d, got %d", expected, i, r)
 		}
 	}
 
@@ -115,8 +119,8 @@ func TestRedisClientAndLuaScripts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BookTicket user1 after rollback failed: %v", err)
 	}
-	if res != ResultSuccess {
-		t.Errorf("Expected user1 to re-book successfully after rollback, got %d", res)
+	if res != ResultSuccessHitZero {
+		t.Errorf("Expected user1 to re-book successfully with ResultSuccessHitZero, got %d", res)
 	}
 
 	// 7. Test Idempotency Key

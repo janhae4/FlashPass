@@ -12,6 +12,8 @@ const (
 	OrderStatusPendingPayment OrderStatus = "PENDING_PAYMENT"
 	OrderStatusPaid           OrderStatus = "PAID"
 	OrderStatusExpired        OrderStatus = "EXPIRED"
+	OrderStatusRefundPending  OrderStatus = "REFUND_PENDING"
+	OrderStatusRefunded       OrderStatus = "REFUNDED"
 	OrderStatusCancelled      OrderStatus = "CANCELLED"
 )
 

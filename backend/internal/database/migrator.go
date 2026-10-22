@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+//go:embed migrations/*.sql
 var MigrationFS embed.FS
 
 type Migrator struct {

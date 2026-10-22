@@ -22,14 +22,17 @@ type Config struct {
 	DBHealthCheckPeriod  time.Duration
 
 	// Redis
-	RedisURL         string
-	RedisHost        string
-	RedisPort        string
-	RedisPassword    string
-	RedisPoolSize    int
+	RedisURL          string
+	RedisHost         string
+	RedisPort         string
+	RedisReplicaPort  string
+	RedisSentinelHost string
+	RedisSentinelPort string
+	RedisPassword     string
+	RedisPoolSize     int
 	RedisMinIdleConns int
-	RedisDialTimeout time.Duration
-	RedisReadTimeout time.Duration
+	RedisDialTimeout  time.Duration
+	RedisReadTimeout  time.Duration
 	RedisWriteTimeout time.Duration
 
 	// RabbitMQ
@@ -58,11 +61,14 @@ func Load() *Config {
 		RedisURL:          getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		RedisHost:         getEnv("REDIS_HOST", "localhost"),
 		RedisPort:         getEnv("REDIS_PORT", "6379"),
+		RedisReplicaPort:  getEnv("REDIS_REPLICA_PORT", "6380"),
+		RedisSentinelHost: getEnv("REDIS_SENTINEL_HOST", "localhost"),
+		RedisSentinelPort: getEnv("REDIS_SENTINEL_PORT", "26379"),
 		RedisPassword:     getEnv("REDIS_PASSWORD", ""),
 		RedisPoolSize:     getEnvAsInt("REDIS_POOL_SIZE", 100),
 		RedisMinIdleConns: getEnvAsInt("REDIS_MIN_IDLE_CONNS", 20),
-		RedisDialTimeout: 5 * time.Second,
-		RedisReadTimeout: 3 * time.Second,
+		RedisDialTimeout:  5 * time.Second,
+		RedisReadTimeout:  3 * time.Second,
 		RedisWriteTimeout: 3 * time.Second,
 
 		// RabbitMQ

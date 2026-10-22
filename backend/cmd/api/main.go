@@ -75,5 +75,6 @@ func main() {
 	<-stopChan
 	log.Println("[Server] Gracefully shutting down FlashPass API Engine...")
 	_ = app.Shutdown()
+	consumerService.Stop()
 	log.Println("[Server] Server exited cleanly.")
 }

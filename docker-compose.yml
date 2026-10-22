@@ -34,6 +34,39 @@ services:
       retries: 5
       start_period: 3s
 
+  redis_replica:
+    image: redis:7-alpine
+    container_name: flashpass_redis_replica
+    restart: unless-stopped
+    ports:
+      - "${REDIS_REPLICA_PORT:-6380}:6379"
+    volumes:
+      - redis_replica_data:/data
+    command: redis-server --replicaof redis 6379 --replica-announce-ip 127.0.0.1 --replica-announce-port 6380
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+    depends_on:
+      - redis
+
+  sentinel:
+    image: redis:7-alpine
+    container_name: flashpass_redis_sentinel
+    restart: unless-stopped
+    command: >
+      sh -c "cp /etc/redis/sentinel.conf /tmp/sentinel.conf &&
+             redis-server /tmp/sentinel.conf --sentinel"
+    ports:
+      - "26379:26379"
+    volumes:
+      - ./sentinel.conf:/etc/redis/sentinel.conf:ro
+    depends_on:
+      - redis
+      - redis_replica
+
   rabbitmq:
     build:
       context: ./docker/rabbitmq
@@ -59,6 +92,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  redis_replica_data:
   rabbitmq_data:
 
 networks:

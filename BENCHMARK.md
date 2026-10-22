@@ -2,7 +2,7 @@
 
 > **Target KPI:** 20,000 requests surging on 1,000 inventory stock  
 > **Result:** 0.00% Overselling, 0 Failed Requests, p95 = 18.83ms, p99 = 29.42ms  
-> **Tool:** Grafana k6 v1.7.1  
+> **Tool:** Grafana k6 v1.7.1 & Python Visualization Engine  
 
 ---
 
@@ -22,20 +22,39 @@ PostgreSQL Orders: Exactly 1,000 (Zero overselling)
 
 ---
 
-## 2. Key Performance Indicators (KPIs)
+## 2. Visual Performance Dashboard
 
-| Metric | Target SLA | Benchmark Result | Status |
-| :--- | :--- | :--- | :---: |
-| **Overselling Rate** | 0.00% (Strict 1,000 orders) | **0.00% (Exactly 1,000)** |  PASSED |
-| **p95 Latency** | < 25.00 ms | **18.83 ms** |  PASSED |
-| **p99 Latency** | < 50.00 ms | **29.42 ms** |  PASSED |
-| **Fail-Fast Rejection** | < 2.00 ms | **947.4 µs (Min)** |  PASSED |
-| **Server Error Rate** | < 0.01% | **0.00% (0 errors)** |  PASSED |
-| **Check Success Rate** | 100% | **100.00% (20,000 / 20,000)** |  PASSED |
+Generated via `scripts/visualize_benchmark.py`:
+
+![FlashPass Benchmark Dashboard](./docs/benchmark_chart.png)
+
+### Latency Percentiles vs 25ms SLA Target
+
+```mermaid
+xychart-beta
+    title "Latency Percentiles (ms) vs Target SLA (25ms)"
+    x-axis ["Min", "Median (p50)", "Average", "p90", "p95", "p99"]
+    y-axis "Response Time (ms)" 0 --> 35
+    bar [0.95, 10.55, 11.67, 16.49, 18.83, 29.42]
+    line [25, 25, 25, 25, 25, 25]
+```
 
 ---
 
-## 3. k6 Test Execution Metrics
+## 3. Key Performance Indicators (KPIs)
+
+| Metric | Target SLA | Benchmark Result | Status |
+| :--- | :--- | :--- | :---: |
+| **Overselling Rate** | 0.00% (Strict 1,000 orders) | **0.00% (Exactly 1,000)** | ✅ PASSED |
+| **p95 Latency** | < 25.00 ms | **18.83 ms** | ✅ PASSED |
+| **p99 Latency** | < 50.00 ms | **29.42 ms** | ✅ PASSED |
+| **Fail-Fast Rejection** | < 2.00 ms | **947.4 µs (Min)** | ✅ PASSED |
+| **Server Error Rate** | < 0.01% | **0.00% (0 errors)** | ✅ PASSED |
+| **Check Success Rate** | 100% | **100.00% (20,000 / 20,000)** | ✅ PASSED |
+
+---
+
+## 4. k6 Test Execution Metrics
 
 ```
      execution: local
@@ -83,9 +102,7 @@ PostgreSQL Orders: Exactly 1,000 (Zero overselling)
 
 ---
 
-## 4. PostgreSQL Persistence & Zero Overselling Audit
-
-Direct database query immediately following load test execution:
+## 5. PostgreSQL Persistence & Zero Overselling Audit
 
 ```sql
 SELECT status, count(1) 
@@ -102,21 +119,6 @@ GROUP BY status;
 (1 row)
 ```
 
-```sql
-SELECT count(1) AS total_orders 
-FROM orders 
-WHERE event_id = 'e9b8849b-7e61-4648-936c-941a329fa9c1';
-```
-
-**Query Result:**
-```
- total_orders 
---------------
-         1000
-(1 row)
-```
-
-**Verification:**  
 - **Initial Inventory:** 1,000
 - **Total Reservations:** 1,000
 - **Total Persistent Orders in DB:** 1,000
@@ -124,16 +126,23 @@ WHERE event_id = 'e9b8849b-7e61-4648-936c-941a329fa9c1';
 
 ---
 
-## 5. Architectural Factors for High Performance
+## 6. Stress Testing Limits & System Bottleneck Analysis
 
-1. **Redis Atomic Lua Scripting:**
-   - Both stock availability checks and stock decrements are encapsulated within a single Redis Lua script execution.
-   - Avoids application-level race conditions and network round-trips.
-2. **Fail-Fast In-Memory Rejection:**
-   - Out-of-stock requests are rejected in **< 1ms** directly in Redis RAM without triggering database queries or message broker publishing.
-3. **Decoupled Asynchronous Persistence:**
-   - RabbitMQ ingests the accepted reservations at wire speed (`202 Accepted`).
-   - Background consumer workers safely stream orders into PostgreSQL with batched connection pool limits.
-4. **Connection Pooling Optimization:**
-   - Redis Pool: 100 active connections, 20 idle connections.
-   - PostgreSQL Pool: 50 active connections with idle timeouts.
+When stress testing FlashPass, each tier exhibits specific throughput limits:
+
+```mermaid
+flowchart TD
+    Client["Client Generators<br/>(Browser: 6 sockets / k6 CLI: 16k ports)"] -->|HTTP/1.1 Pool| Gateway["Go Fiber Gateway<br/>Capacity: ~100k RPS"]
+    Gateway -->|Redis Connection Pool| Redis["Redis 7 (Single Core)<br/>Capacity: ~60k-80k Lua/s"]
+    Gateway -->|Channel Pool| RMQ["RabbitMQ Buffer<br/>Capacity: ~30k msgs/s"]
+    RMQ -->|Batched Consumers| DB[("PostgreSQL 16 Pool<br/>Capacity: ~2.5k writes/s")]
+```
+
+1. **Client Bottleneck (Browser vs CLI):**
+   - **Web Browser (Chrome/Edge):** Enforces a hard limit of **6 concurrent TCP connections per origin**. Generating 10,000 simultaneous `fetch()` requests in the browser triggers immediate socket starvation (`ERR_INSUFFICIENT_RESOURCES`), causing requests to fail at the client level before reaching the server. Browser demos should use **25–100 VUs**.
+   - **k6 CLI on Local Machine:** Windows ephemeral ports limit concurrent sockets to ~16,384 with `TIME_WAIT` recycling. Safe max concurrency is 100–500 VUs, achieving **8,000 - 15,000 RPS**. Testing beyond 100,000 RPS requires distributed k6 nodes.
+2. **Redis Ingestion Limit:**
+   - Redis executes Lua scripts sequentially on a single thread. Each Lua evaluation takes ~0.02–0.05ms. Theoretical maximum is **60,000 – 80,000 requests/sec** per Redis primary node.
+3. **RabbitMQ & PostgreSQL Cushioning:**
+   - RabbitMQ handles up to **30,000 msg/sec** wire speed.
+   - PostgreSQL can only sustain **2,000 – 3,000 writes/sec** on commodity SSDs. Decoupling DB writes via RabbitMQ queues protects PostgreSQL from collapsing under high concurrency.

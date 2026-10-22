@@ -7,7 +7,7 @@ import (
 )
 
 func SetupRouter(app *fiber.App, h *Handler) {
-	// Middleware
+
 	app.Use(recover.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
@@ -15,28 +15,25 @@ func SetupRouter(app *fiber.App, h *Handler) {
 		AllowMethods: "GET, POST, PUT, DELETE, OPTIONS",
 	}))
 
-	// Health check
 	app.Get("/health", h.HealthCheck)
 
-	// API v1 group
 	v1 := app.Group("/api/v1")
-
-	// Admin endpoints
 	admin := v1.Group("/admin")
 	admin.Post("/events/:id/prewarm", h.PrewarmEvent)
 	admin.Get("/events/:id/metrics", h.GetAdminMetrics)
 	admin.Post("/events/:id/reset", h.ResetEvent)
+	admin.Post("/events/:id/reconcile", h.ReconcileEvent)
+	admin.Post("/events/:id/users/:userId/unlock", h.UnlockUser)
+	admin.Get("/circuit-breaker", h.GetCircuitBreakerStatus)
 
-	// Ticket endpoints
 	tickets := v1.Group("/tickets")
 	tickets.Post("/book", h.BookTicket)
 
-	// Event inventory endpoints
 	events := v1.Group("/events")
 	events.Get("/:id", h.GetEvent)
 	events.Get("/:id/stock", h.GetStock)
 
-	// Order endpoints
 	orders := v1.Group("/orders")
 	orders.Post("/:id/pay", h.PayOrder)
+	orders.Post("/:id/cancel", h.CancelOrder)
 }
